@@ -123,3 +123,20 @@ def test_expand_parents_off_returns_children(conn):
 
     results = search(conn, "wind", FakeEmbedder(), limit=3, expand_parents=False)
     assert any(u.parent_id is not None for u in results)
+
+
+def test_search_raises_clearly_on_embedder_dimension_drift(conn):
+    """A dimension mismatch between the query embedder and the indexed vectors (e.g. a
+    stale index after a model swap) must surface as a clear error through the public
+    search() entrypoint too, not just when calling vector_search directly."""
+    _seed(conn, ["wind"])
+
+    class DriftedEmbedder:
+        name = "fake-64"  # same name index_units used in _seed's FakeEmbedder(), wrong dim
+        dim = 8
+
+        def encode(self, texts):
+            return [[0.1] * 8 for _ in texts]
+
+    with pytest.raises(ValueError, match="dim"):
+        search(conn, "wind", DriftedEmbedder(), limit=3)

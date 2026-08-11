@@ -80,7 +80,14 @@ def verify_claim(conn: sqlite3.Connection, claim: Claim, nli: NLIModel,
     entail = float(scores.get("entailment", 0.0))
     contra = float(scores.get("contradiction", 0.0))
 
-    if contra >= threshold and contra > entail:
+    # NLI is a filter, not an oracle (spec §5, §8): when the model is confidently asserting
+    # both entailment and contradiction at once (a tie or near-tie above threshold), that is
+    # an unreliable/ambiguous read, not evidence favoring one side. Defaulting a tie to
+    # SUPPORTED would let a claim the model is equally confident contradicts pass as
+    # verified; routing it to NEUTRAL keeps verification conservative instead.
+    if contra >= threshold and entail >= threshold:
+        verdict = Verdict.NEUTRAL
+    elif contra >= threshold and contra > entail:
         verdict = Verdict.CONTRADICTED
     elif entail >= threshold:
         verdict = Verdict.SUPPORTED

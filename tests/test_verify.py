@@ -99,6 +99,38 @@ def test_threshold_is_respected(conn):
     assert verify_claim(conn, _claim(), nli, threshold=0.9).verdict == Verdict.NEUTRAL
 
 
+# --- tie-break between entailment and contradiction (adversarial finding) --------------
+
+def test_exact_tie_above_threshold_is_neutral_not_supported(conn):
+    """When the model is equally confident in entailment and contradiction, that is an
+    unreliable read, not evidence favoring SUPPORTED — must not silently default to it."""
+    nli = FakeNLI(default={"entailment": 0.9, "neutral": 0.0, "contradiction": 0.9})
+    assert verify_claim(conn, _claim(), nli).verdict == Verdict.NEUTRAL
+
+
+def test_tie_at_exactly_the_threshold_is_neutral(conn):
+    nli = FakeNLI(default={"entailment": 0.5, "neutral": 0.0, "contradiction": 0.5})
+    assert verify_claim(conn, _claim(), nli, threshold=0.5).verdict == Verdict.NEUTRAL
+
+
+def test_near_tie_with_both_scores_above_threshold_is_still_neutral(conn):
+    """Both sides confidently above threshold, even a hair apart, is still ambiguous."""
+    nli = FakeNLI(default={"entailment": 0.60, "neutral": 0.0, "contradiction": 0.58})
+    assert verify_claim(conn, _claim(), nli).verdict == Verdict.NEUTRAL
+
+
+def test_clear_entailment_gap_still_resolves_to_supported(conn):
+    """A real, non-ambiguous gap between the two scores must still verify normally —
+    the fix targets ties, not the ordinary supported case."""
+    nli = FakeNLI(default={"entailment": 0.85, "neutral": 0.10, "contradiction": 0.05})
+    assert verify_claim(conn, _claim(), nli).verdict == Verdict.SUPPORTED
+
+
+def test_clear_contradiction_gap_still_resolves_to_contradicted(conn):
+    nli = FakeNLI(default={"entailment": 0.05, "neutral": 0.10, "contradiction": 0.85})
+    assert verify_claim(conn, _claim(), nli).verdict == Verdict.CONTRADICTED
+
+
 # --- contradiction detection (spec §8, same pass) ----------------------------
 
 def test_find_contradictions_returns_conflicting_units(conn):

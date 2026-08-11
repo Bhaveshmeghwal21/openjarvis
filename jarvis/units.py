@@ -89,18 +89,53 @@ def _label_pattern(label: str) -> re.Pattern[str] | None:
     return re.compile(rf"\b{stem}[a-z]*\.?\s*{re.escape(number)}\b(?!\.?\d)", re.IGNORECASE)
 
 
-def find_references(blocks: Sequence[Block], label: str) -> list[str]:
-    """Prose blocks that mention `label`. This is what keeps 'as shown in Figure 3' bound."""
+def _nearest_of(position: int, candidates: Sequence[int]) -> int | None:
+    """Which of `candidates` (block indices) is closest to `position`. Ties favor the earlier
+    candidate, so a caption/reference sitting exactly between two same-labeled artifacts is
+    deterministically attributed rather than binding to whichever the loop iterated to last.
+    """
+    if not candidates:
+        return None
+    return min(candidates, key=lambda c: (abs(c - position), c))
+
+
+def find_references(blocks: Sequence[Block], label: str, *, owner: int | None = None,
+                    candidates: Sequence[int] | None = None) -> list[str]:
+    """Prose blocks that mention `label`. This is what keeps 'as shown in Figure 3' bound.
+
+    When `owner` and `candidates` are given, a match is only returned when `owner` (a block
+    index) is the nearest of `candidates` (block indices sharing `label`) to the matching
+    prose block — this disambiguates which of several same-labeled artifacts a reference
+    belongs to. Omitted (the default), every match in the document is returned, which is
+    correct whenever `label` is unique — the common case, and the only one the original
+    single-artifact call sites need.
+    """
     pattern = _label_pattern(label)
     if pattern is None:
         return []
-    return [b.text for b in blocks
-            if b.kind in PROSE_KINDS and pattern.search(b.text)]
+    found: list[str] = []
+    for i, b in enumerate(blocks):
+        if b.kind not in PROSE_KINDS or not pattern.search(b.text):
+            continue
+        if owner is not None and candidates and _nearest_of(i, candidates) != owner:
+            continue
+        found.append(b.text)
+    return found
 
 
 def build_artifact_units(parsed: ParsedPaper, start_ordinal: int = 0) -> list[Unit]:
-    """One unit per table/figure/equation: artifact + caption + referring prose, indivisible."""
+    """One unit per table/figure/equation: artifact + caption + referring prose, indivisible.
+
+    Caption/reference binding is scoped to the *nearest* same-labeled artifact, not a
+    document-wide exact-label scan. A document-wide scan would let two distinct artifacts
+    that happen to share a label (e.g. an appendix restarting "Table 3" numbering) each
+    absorb the other's caption — the text is genuinely present, but attributed to the wrong
+    table. Binding by proximity keeps each artifact's evidence pointed at its own location
+    even when labels collide; it is a no-op whenever a label is unique in the document,
+    which is the common case and the one every existing test exercises.
+    """
     blocks = list(parsed.blocks)
+    artifact_positions = [i for i, b in enumerate(blocks) if b.kind in ARTIFACT_KINDS]
     units: list[Unit] = []
     ordinal = start_ordinal
 
@@ -114,9 +149,11 @@ def build_artifact_units(parsed: ParsedPaper, start_ordinal: int = 0) -> list[Un
             parts.append(block.text)
 
         if block.label:
-            parts += [b.text for b in blocks
-                      if b.kind == "caption" and b.label == block.label]
-            parts += find_references(blocks, block.label)
+            same_label = [j for j in artifact_positions if blocks[j].label == block.label]
+            parts += [b.text for j, b in enumerate(blocks)
+                      if b.kind == "caption" and b.label == block.label
+                      and _nearest_of(j, same_label) == i]
+            parts += find_references(blocks, block.label, owner=i, candidates=same_label)
         else:
             # Unlabelled artifact (common for equations): take the preceding prose block.
             for previous in reversed(blocks[:i]):

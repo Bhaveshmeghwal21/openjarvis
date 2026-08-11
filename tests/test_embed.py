@@ -80,3 +80,37 @@ def test_vector_search_ignores_other_models(conn):
 
 def test_vector_search_on_empty_index_returns_empty(conn):
     assert vector_search(conn, [0.1] * 64, "fake-64") == []
+
+
+# --- dimension-drift guard (adversarial finding) ----------------------------------------
+
+def test_vector_search_raises_a_clear_error_on_dimension_mismatch(conn):
+    """A stale index after an embedder swap must fail loudly and clearly, not with an
+    opaque numpy ValueError from a matmul shape mismatch deep inside the function."""
+    e = FakeEmbedder(dim=64)
+    units = [_unit("u1", "alpha")]
+    save_units(conn, units)
+    index_units(conn, units, e)
+
+    with pytest.raises(ValueError, match="dim=8"):
+        vector_search(conn, [0.1] * 8, e.name)
+
+
+def test_vector_search_error_names_both_dimensions(conn):
+    e = FakeEmbedder(dim=64)
+    units = [_unit("u1", "alpha")]
+    save_units(conn, units)
+    index_units(conn, units, e)
+
+    with pytest.raises(ValueError, match=r"dim=8.*\[64\]|\[64\].*dim=8"):
+        vector_search(conn, [0.1] * 8, e.name)
+
+
+def test_vector_search_succeeds_when_dimension_matches(conn):
+    """The guard must not false-positive on the ordinary, correctly-dimensioned case."""
+    e = FakeEmbedder(dim=64)
+    units = [_unit("u1", "alpha alpha alpha"), _unit("u2", "beta beta beta", 1)]
+    save_units(conn, units)
+    index_units(conn, units, e)
+    hits = vector_search(conn, e.encode(["alpha alpha alpha"])[0], e.name)
+    assert hits[0][0] == "u1"

@@ -111,3 +111,66 @@ def test_labeled_artifact_with_no_text_caption_or_references_still_becomes_a_uni
     assert len(units) == 1
     assert units[0].label == "Figure 7"
     assert units[0].verbatim_text  # never empty — falls back to the label
+
+
+# --- duplicate-label disambiguation (adversarial finding, whole-branch review) ----------
+
+def test_duplicate_labels_bind_each_artifact_to_its_own_nearest_caption():
+    """Two distinct tables sharing a label (e.g. an appendix restarting numbering) must
+    each get only their own caption, never absorb the other's — a document-wide exact-label
+    scan would merge both captions into both tables, misattributing evidence."""
+    main_table = Block(kind="table", text="| main | 94.2 |", page=3, label="Table 3")
+    main_caption = Block(kind="caption", text="Table 3: Main paper results.", page=3,
+                         label="Table 3")
+    appendix_table = Block(kind="table", text="| appendix | 12.5 |", page=15, label="Table 3")
+    appendix_caption = Block(kind="caption", text="Table 3: Appendix results.", page=15,
+                             label="Table 3")
+
+    units = build_artifact_units(
+        _parsed([main_table, main_caption, appendix_table, appendix_caption])
+    )
+    main_unit, appendix_unit = units[0], units[1]
+
+    assert "Main paper results" in main_unit.verbatim_text
+    assert "Appendix results" not in main_unit.verbatim_text
+    assert "Appendix results" in appendix_unit.verbatim_text
+    assert "Main paper results" not in appendix_unit.verbatim_text
+
+
+def test_duplicate_labels_bind_referring_prose_to_the_nearest_artifact():
+    """A reference sentence must bind to whichever same-labeled artifact it sits nearest
+    to in document order, not to every artifact sharing that label."""
+    near_main = Block(kind="paragraph", text="Table 3 confirms the main finding.", page=3)
+    main_table = Block(kind="table", text="| main | 94.2 |", page=3, label="Table 3")
+    appendix_table = Block(kind="table", text="| appendix | 12.5 |", page=15, label="Table 3")
+    near_appendix = Block(kind="paragraph", text="Table 3 also holds in the appendix.",
+                          page=15)
+
+    units = build_artifact_units(
+        _parsed([near_main, main_table, appendix_table, near_appendix])
+    )
+    main_unit, appendix_unit = units[0], units[1]
+
+    assert "confirms the main finding" in main_unit.verbatim_text
+    assert "holds in the appendix" not in main_unit.verbatim_text
+    assert "holds in the appendix" in appendix_unit.verbatim_text
+    assert "confirms the main finding" not in appendix_unit.verbatim_text
+
+
+def test_unique_labels_are_unaffected_by_disambiguation():
+    """When a label appears only once, nearest-artifact scoping must be a strict no-op —
+    this is the common case and must not regress."""
+    units = build_artifact_units(_parsed([TABLE, CAPTION, REFERRING]))
+    table = next(u for u in units if u.type == UnitType.TABLE)
+    assert "Accuracy on KITTI" in table.verbatim_text
+    assert "As shown in Table 3" in table.verbatim_text
+
+
+def test_find_references_owner_scoping_is_opt_in():
+    """Without `owner`/`candidates`, find_references keeps its original document-wide
+    behavior — existing standalone callers must not be affected by the new parameters."""
+    blocks = [
+        Block(kind="paragraph", text="see Table 3 for details"),
+        Block(kind="paragraph", text="Tab. 3 confirms this"),
+    ]
+    assert len(find_references(blocks, "Table 3")) == 2

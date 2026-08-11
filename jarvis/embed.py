@@ -113,12 +113,29 @@ def index_units(conn: sqlite3.Connection, units: Sequence[Unit], embedder: Embed
 
 def vector_search(conn: sqlite3.Connection, query_vector: Sequence[float], model: str,
                   limit: int = 20) -> list[tuple[str, float]]:
-    """Brute-force cosine over stored vectors. Returns (unit_id, similarity), best first."""
+    """Brute-force cosine over stored vectors. Returns (unit_id, similarity), best first.
+
+    Raises `ValueError` naming the expected vs. actual dimension if the query vector's
+    length does not match the stored rows for `model` — an embedder swap without a full
+    re-index would otherwise reach `numpy`'s matmul with mismatched shapes and fail with an
+    opaque, unactionable error instead of a clear one.
+    """
     rows = conn.execute(
         "SELECT unit_id, dim, vector FROM embeddings WHERE model = ?", (model,)
     ).fetchall()
     if not rows:
         return []
+
+    query_dim = len(query_vector)
+    stored_dims = {r["dim"] for r in rows}
+    if query_dim not in stored_dims:
+        expected = sorted(stored_dims)
+        raise ValueError(
+            f"vector_search: query vector has dim={query_dim} but embeddings stored under "
+            f"model={model!r} have dim={expected} — re-index with the current embedder "
+            f"before searching, or use a different model name for a new dimension"
+        )
+    rows = [r for r in rows if r["dim"] == query_dim]
 
     import numpy as np
 
