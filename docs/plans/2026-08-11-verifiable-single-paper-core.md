@@ -767,6 +767,20 @@ def test_parent_id_survives_roundtrip(conn):
     save_units(conn, [_unit("parent"), _unit("child", ordinal=1, parent="parent")])
     child = get_unit(conn, "child")
     assert child.parent_id == "parent"
+
+
+def test_resaving_a_unit_refreshes_its_section_path(conn):
+    # unit_id embeds paper_id/type/page/ordinal, so those can't silently go stale on a
+    # same-id re-save — but section_path is not part of the id and must be refreshed
+    # explicitly, or a re-chunk with different section boundaries leaves a stale path.
+    import dataclasses
+
+    save_paper(conn, Paper("p1", "T"))
+    original = _unit()
+    save_units(conn, [original])
+    moved = dataclasses.replace(original, section_path=("Results", "Ablations"))
+    save_units(conn, [moved])
+    assert get_unit(conn, original.unit_id).section_path == ("Results", "Ablations")
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -833,12 +847,17 @@ def get_raw_text(conn: sqlite3.Connection, paper_id: str) -> str:
 
 
 def save_units(conn: sqlite3.Connection, units: list[Unit]) -> None:
+    """Upsert units. `unit_id` embeds paper_id/type/page/ordinal (see `Unit.key()`), so
+    those can never silently go stale on a same-id re-save; section_path is not part of
+    the id and must be refreshed explicitly, or a re-chunk with different section
+    boundaries would leave the old path in storage."""
     conn.executemany(
         """
         INSERT INTO units (unit_id, paper_id, type, page, section_path, verbatim_text,
                            ordinal, context_prefix, parent_id, label)
         VALUES (?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(unit_id) DO UPDATE SET
+            section_path=excluded.section_path,
             verbatim_text=excluded.verbatim_text,
             context_prefix=excluded.context_prefix,
             parent_id=excluded.parent_id, label=excluded.label
