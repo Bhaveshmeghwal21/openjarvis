@@ -1344,6 +1344,28 @@ def test_ordinals_continue_from_start_ordinal():
 def test_captions_are_not_emitted_as_standalone_units():
     units = build_artifact_units(_parsed([TABLE, CAPTION]))
     assert len(units) == 1
+
+
+def test_find_references_rejects_a_decimal_numbered_label():
+    # "Table 3" must not match "Table 3.1" / "Table 3.2" / "Table 3.10" — those are
+    # different, more specific tables, and folding their prose into Table 3's unit
+    # would fabricate an association the paper never made.
+    blocks = [
+        Block(kind="paragraph", text="Table 3.1 shows the breakdown by class."),
+        Block(kind="paragraph", text="Table 3.2 provides more detail."),
+        Block(kind="paragraph", text="See Table 3.10 for the ablation."),
+        Block(kind="paragraph", text="Table 3 confirms this."),
+    ]
+    found = find_references(blocks, "Table 3")
+    assert found == ["Table 3 confirms this."]
+
+
+def test_labeled_artifact_with_no_text_caption_or_references_still_becomes_a_unit():
+    figure = Block(kind="figure", text="", page=4, label="Figure 7")
+    units = build_artifact_units(_parsed([figure]))
+    assert len(units) == 1
+    assert units[0].label == "Figure 7"
+    assert units[0].verbatim_text  # never empty — falls back to the label
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -1366,13 +1388,19 @@ ARTIFACT_KINDS = {"table": UnitType.TABLE, "figure": UnitType.FIGURE,
 
 
 def _label_pattern(label: str) -> re.Pattern[str] | None:
-    """Match 'Table 3' / 'Tab. 3' / 'Fig 3' but never 'Table 30'."""
+    """Match 'Table 3' / 'Tab. 3' / 'Fig 3' but never 'Table 30' or 'Table 3.1'.
+
+    The trailing lookahead rejects both a directly-following digit ("30") and a
+    decimal continuation (".1", ".10") — without the latter, "Table 3" would wrongly
+    match inside "Table 3.1 shows...", folding prose about a different, more specific
+    table into Table 3's evidence unit.
+    """
     m = re.match(r"([A-Za-z]+)\.?\s*(\d+)", label.strip())
     if not m:
         return None
     word, number = m.group(1), m.group(2)
     stem = re.escape(word[:3])
-    return re.compile(rf"\b{stem}[a-z]*\.?\s*{re.escape(number)}\b(?!\d)", re.IGNORECASE)
+    return re.compile(rf"\b{stem}[a-z]*\.?\s*{re.escape(number)}\b(?!\.?\d)", re.IGNORECASE)
 
 
 def find_references(blocks: Sequence[Block], label: str) -> list[str]:
@@ -1411,7 +1439,12 @@ def build_artifact_units(parsed: ParsedPaper, start_ordinal: int = 0) -> list[Un
                     break
 
         if not parts:
-            continue
+            # A labeled-but-textless artifact (e.g. a figure with no matched caption and
+            # no referencing prose) must still become a unit, never vanish silently —
+            # fall back to its label, or a minimal placeholder if it has none.
+            parts = [block.label] if block.label else [
+                f"({unit_type.value} on page {block.page}, no extractable text or caption)"
+            ]
 
         unit = Unit(unit_id="", paper_id=parsed.paper_id, type=unit_type, page=block.page,
                     section_path=block.section_path,
