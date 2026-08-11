@@ -54,3 +54,69 @@ def build_prose_units(parsed: ParsedPaper, max_tokens: int = DEFAULT_MAX_TOKENS)
 def _with_id(unit: Unit) -> Unit:
     from dataclasses import replace
     return replace(unit, unit_id=unit.key())
+
+
+import re
+from collections.abc import Sequence
+
+from jarvis.models import Block
+
+ARTIFACT_KINDS = {"table": UnitType.TABLE, "figure": UnitType.FIGURE,
+                  "equation": UnitType.EQUATION}
+
+
+def _label_pattern(label: str) -> re.Pattern[str] | None:
+    """Match 'Table 3' / 'Tab. 3' / 'Fig 3' but never 'Table 30'."""
+    m = re.match(r"([A-Za-z]+)\.?\s*(\d+)", label.strip())
+    if not m:
+        return None
+    word, number = m.group(1), m.group(2)
+    stem = re.escape(word[:3])
+    return re.compile(rf"\b{stem}[a-z]*\.?\s*{re.escape(number)}\b(?!\d)", re.IGNORECASE)
+
+
+def find_references(blocks: Sequence[Block], label: str) -> list[str]:
+    """Prose blocks that mention `label`. This is what keeps 'as shown in Figure 3' bound."""
+    pattern = _label_pattern(label)
+    if pattern is None:
+        return []
+    return [b.text for b in blocks
+            if b.kind in PROSE_KINDS and pattern.search(b.text)]
+
+
+def build_artifact_units(parsed: ParsedPaper, start_ordinal: int = 0) -> list[Unit]:
+    """One unit per table/figure/equation: artifact + caption + referring prose, indivisible."""
+    blocks = list(parsed.blocks)
+    units: list[Unit] = []
+    ordinal = start_ordinal
+
+    for i, block in enumerate(blocks):
+        unit_type = ARTIFACT_KINDS.get(block.kind)
+        if unit_type is None:
+            continue
+
+        parts: list[str] = []
+        if block.text.strip():
+            parts.append(block.text)
+
+        if block.label:
+            parts += [b.text for b in blocks
+                      if b.kind == "caption" and b.label == block.label]
+            parts += find_references(blocks, block.label)
+        else:
+            # Unlabelled artifact (common for equations): take the preceding prose block.
+            for previous in reversed(blocks[:i]):
+                if previous.kind in PROSE_KINDS:
+                    parts.insert(0, previous.text)
+                    break
+
+        if not parts:
+            continue
+
+        unit = Unit(unit_id="", paper_id=parsed.paper_id, type=unit_type, page=block.page,
+                    section_path=block.section_path,
+                    verbatim_text=normalize(" ".join(parts)), ordinal=ordinal,
+                    label=block.label)
+        units.append(_with_id(unit))
+        ordinal += 1
+    return units
