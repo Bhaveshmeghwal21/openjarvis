@@ -1346,6 +1346,13 @@ def test_captions_are_not_emitted_as_standalone_units():
     assert len(units) == 1
 
 
+def test_find_references_matches_the_eq_abbreviation():
+    # "Eq." doesn't share a 3-letter prefix with "Equation" the way "Tab."/"Fig." do
+    # with their full words, so it needs an explicit override.
+    blocks = [Block(kind="paragraph", text="Eq. 5 gives the result.")]
+    assert find_references(blocks, "Equation 5") == ["Eq. 5 gives the result."]
+
+
 def test_find_references_rejects_a_decimal_numbered_label():
     # "Table 3" must not match "Table 3.1" / "Table 3.2" / "Table 3.10" — those are
     # different, more specific tables, and folding their prose into Table 3's unit
@@ -1387,8 +1394,16 @@ ARTIFACT_KINDS = {"table": UnitType.TABLE, "figure": UnitType.FIGURE,
                   "equation": UnitType.EQUATION}
 
 
+# The word[:3] stem heuristic works only when an abbreviation shares a 3+ letter prefix
+# with the full word ("Table"/"Tab.", "Figure"/"Fig." both do). "Eq." does not share a
+# 3-letter prefix with "Equation", so it needs an explicit override — without one,
+# find_references(blocks, "Equation 5") would never match "Eq. 5 gives the result",
+# silently dropping referencing prose for equations specifically.
+_ABBREVIATIONS = {"equation": "eq"}
+
+
 def _label_pattern(label: str) -> re.Pattern[str] | None:
-    """Match 'Table 3' / 'Tab. 3' / 'Fig 3' but never 'Table 30' or 'Table 3.1'.
+    """Match 'Table 3' / 'Tab. 3' / 'Fig 3' / 'Eq. 5' but never 'Table 30' or 'Table 3.1'.
 
     The trailing lookahead rejects both a directly-following digit ("30") and a
     decimal continuation (".1", ".10") — without the latter, "Table 3" would wrongly
@@ -1399,7 +1414,7 @@ def _label_pattern(label: str) -> re.Pattern[str] | None:
     if not m:
         return None
     word, number = m.group(1), m.group(2)
-    stem = re.escape(word[:3])
+    stem = re.escape(_ABBREVIATIONS.get(word.lower(), word[:3]))
     return re.compile(rf"\b{stem}[a-z]*\.?\s*{re.escape(number)}\b(?!\.?\d)", re.IGNORECASE)
 
 
