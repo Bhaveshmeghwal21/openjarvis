@@ -139,3 +139,38 @@ def build_artifact_units(parsed: ParsedPaper, start_ordinal: int = 0) -> list[Un
         units.append(_with_id(unit))
         ordinal += 1
     return units
+
+
+from dataclasses import replace as _replace
+
+
+def build_units(parsed: ParsedPaper, max_tokens: int = DEFAULT_MAX_TOKENS) -> list[Unit]:
+    """Full Layer 1 build: prose children with section parents, plus artifact units.
+
+    Children are what get embedded and matched; parents are what get sent to the model at
+    answer time (spec §5, parent/child structure).
+    """
+    children = build_prose_units(parsed, max_tokens=max_tokens)
+    artifacts = build_artifact_units(parsed, start_ordinal=len(children))
+
+    by_section: dict[tuple[tuple[str, ...], int], list[Unit]] = {}
+    for child in children:
+        by_section.setdefault((child.section_path, child.page), []).append(child)
+
+    out: list[Unit] = []
+    parent_ordinal = len(children) + len(artifacts)
+    for (section_path, page), group in by_section.items():
+        if len(group) < 2:
+            out.extend(group)          # a section that fits in one unit needs no parent
+            continue
+        parent = Unit(unit_id="", paper_id=parsed.paper_id, type=UnitType.PROSE, page=page,
+                      section_path=section_path,
+                      verbatim_text=" ".join(u.verbatim_text for u in group),
+                      ordinal=parent_ordinal)
+        parent = _with_id(parent)
+        parent_ordinal += 1
+        out.append(parent)
+        out.extend(_replace(u, parent_id=parent.unit_id) for u in group)
+
+    out.extend(artifacts)
+    return out
