@@ -4,7 +4,16 @@ import dataclasses
 import pytest
 
 from jarvis.models import (
-    Block, Card, CardField, Claim, Paper, ParsedPaper, Unit, UnitType, Verdict, Verification,
+    Block,
+    Card,
+    CardField,
+    Claim,
+    Paper,
+    ParsedPaper,
+    Unit,
+    UnitType,
+    Verdict,
+    Verification,
 )
 
 
