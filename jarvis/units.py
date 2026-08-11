@@ -65,14 +65,28 @@ ARTIFACT_KINDS = {"table": UnitType.TABLE, "figure": UnitType.FIGURE,
                   "equation": UnitType.EQUATION}
 
 
+# The word[:3] stem heuristic works only when an abbreviation shares a 3+ letter prefix
+# with the full word ("Table"/"Tab.", "Figure"/"Fig." both do). "Eq." does not share a
+# 3-letter prefix with "Equation", so it needs an explicit override — without one,
+# find_references(blocks, "Equation 5") would never match "Eq. 5 gives the result",
+# silently dropping referencing prose for equations specifically.
+_ABBREVIATIONS = {"equation": "eq"}
+
+
 def _label_pattern(label: str) -> re.Pattern[str] | None:
-    """Match 'Table 3' / 'Tab. 3' / 'Fig 3' but never 'Table 30'."""
+    """Match 'Table 3' / 'Tab. 3' / 'Fig 3' / 'Eq. 5' but never 'Table 30' or 'Table 3.1'.
+
+    The trailing lookahead rejects both a directly-following digit ("30") and a
+    decimal continuation (".1", ".10") — without the latter, "Table 3" would wrongly
+    match inside "Table 3.1 shows...", folding prose about a different, more specific
+    table into Table 3's evidence unit.
+    """
     m = re.match(r"([A-Za-z]+)\.?\s*(\d+)", label.strip())
     if not m:
         return None
     word, number = m.group(1), m.group(2)
-    stem = re.escape(word[:3])
-    return re.compile(rf"\b{stem}[a-z]*\.?\s*{re.escape(number)}\b(?!\d)", re.IGNORECASE)
+    stem = re.escape(_ABBREVIATIONS.get(word.lower(), word[:3]))
+    return re.compile(rf"\b{stem}[a-z]*\.?\s*{re.escape(number)}\b(?!\.?\d)", re.IGNORECASE)
 
 
 def find_references(blocks: Sequence[Block], label: str) -> list[str]:
@@ -111,7 +125,12 @@ def build_artifact_units(parsed: ParsedPaper, start_ordinal: int = 0) -> list[Un
                     break
 
         if not parts:
-            continue
+            # A labeled-but-textless artifact (e.g. a figure with no matched caption and
+            # no referencing prose) must still become a unit, never vanish silently —
+            # fall back to its label, or a minimal placeholder if it has none.
+            parts = [block.label] if block.label else [
+                f"({unit_type.value} on page {block.page}, no extractable text or caption)"
+            ]
 
         unit = Unit(unit_id="", paper_id=parsed.paper_id, type=unit_type, page=block.page,
                     section_path=block.section_path,

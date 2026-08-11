@@ -82,3 +82,32 @@ def test_ordinals_continue_from_start_ordinal():
 def test_captions_are_not_emitted_as_standalone_units():
     units = build_artifact_units(_parsed([TABLE, CAPTION]))
     assert len(units) == 1
+
+
+def test_find_references_matches_the_eq_abbreviation():
+    # "Eq." doesn't share a 3-letter prefix with "Equation" the way "Tab."/"Fig." do
+    # with their full words, so it needs an explicit override.
+    blocks = [Block(kind="paragraph", text="Eq. 5 gives the result.")]
+    assert find_references(blocks, "Equation 5") == ["Eq. 5 gives the result."]
+
+
+def test_find_references_rejects_a_decimal_numbered_label():
+    # "Table 3" must not match "Table 3.1" / "Table 3.2" / "Table 3.10" — those are
+    # different, more specific tables, and folding their prose into Table 3's unit
+    # would fabricate an association the paper never made.
+    blocks = [
+        Block(kind="paragraph", text="Table 3.1 shows the breakdown by class."),
+        Block(kind="paragraph", text="Table 3.2 provides more detail."),
+        Block(kind="paragraph", text="See Table 3.10 for the ablation."),
+        Block(kind="paragraph", text="Table 3 confirms this."),
+    ]
+    found = find_references(blocks, "Table 3")
+    assert found == ["Table 3 confirms this."]
+
+
+def test_labeled_artifact_with_no_text_caption_or_references_still_becomes_a_unit():
+    figure = Block(kind="figure", text="", page=4, label="Figure 7")
+    units = build_artifact_units(_parsed([figure]))
+    assert len(units) == 1
+    assert units[0].label == "Figure 7"
+    assert units[0].verbatim_text  # never empty — falls back to the label
