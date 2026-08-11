@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jarvis-corpus"
+version = "0.0.1"
+description = "A verifiable research corpus agent — read hundreds of papers, answer from them, prove every claim."
+requires-python = ">=3.10"
+dependencies = [
+    "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+# Layered so the core stays importable offline and CI needs nothing heavy.
+llm = ["openai>=1.40"]
+parse = ["docling>=2.0"]
+index = ["sqlite-vec>=0.1", "sentence-transformers>=3.0"]
+verify = ["transformers>=4.44", "torch>=2.4"]
+dev = ["pytest>=8.0", "ruff>=0.6"]
+
+[tool.setuptools.packages.find]
+include = ["jarvis*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"

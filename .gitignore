@@ -1,0 +1,22 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+
+# Never commit secrets or config holding keys
+.env
+config.json
+
+# Corpora: SQLite files, parsed PDFs, cached artifacts
+*.db
+*.db-wal
+*.db-shm
+projects/
+.jarvis/
+cache/
+*.pdf
