@@ -43,6 +43,16 @@ def test_find_span_is_case_and_punctuation_sensitive_enough_to_matter():
     assert find_span("94.2% on KITTI", "we report 91.7% on KITTI") is None
 
 
+def test_find_span_rejects_a_partial_number_match_inside_a_longer_one():
+    # "2.5% error" is a literal tail-substring of "12.5% error" but is a different,
+    # fabricated number. An unanchored substring search would wrongly accept this.
+    assert find_span("2.5% error", "we measure 12.5% error on the test set") is None
+
+
+def test_find_span_rejects_a_partial_word_match():
+    assert find_span("cat", "the results concatenate nicely") is None
+
+
 def test_find_span_of_empty_needle_is_none():
     assert find_span("", "anything") is None
 

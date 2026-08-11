@@ -48,15 +48,25 @@ def find_span(needle: str, haystack: str) -> tuple[int, int] | None:
 
     Returns (start, end) offsets into `normalize(haystack)`, or None when absent.
     Matching stays exact after normalization: a changed number or word is not a match.
+
+    Boundary-anchored: a plain substring search would let "2.5% error" match inside
+    "12.5% error" — a materially different, fabricated number reported as present. A
+    genuine verbatim quote always starts and ends on a token boundary in the source
+    text, so a match is only accepted when the character immediately before and after
+    it (if any) is not alphanumeric.
     """
     n = normalize(needle)
     if not n:
         return None
     h = normalize(haystack)
     idx = h.find(n)
-    if idx < 0:
-        return None
-    return (idx, idx + len(n))
+    while idx >= 0:
+        before_ok = idx == 0 or not h[idx - 1].isalnum()
+        after_ok = (idx + len(n) == len(h)) or not h[idx + len(n)].isalnum()
+        if before_ok and after_ok:
+            return (idx, idx + len(n))
+        idx = h.find(n, idx + 1)
+    return None
 
 
 def approx_tokens(text: str) -> int:
