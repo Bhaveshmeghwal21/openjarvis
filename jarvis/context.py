@@ -62,7 +62,7 @@ class LLMPrefix:
         try:
             out = self._chat_fn()(self._router, "contextual_prefix", prompt)
             return (out or "").strip() or self._fallback.describe(paper, unit)
-        except (RuntimeError, TimeoutError, OSError, ValueError, TypeError):
+        except Exception:  # noqa: BLE001
             return self._fallback.describe(paper, unit)
 
 
