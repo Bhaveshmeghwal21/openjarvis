@@ -8,8 +8,11 @@ This is the only module that writes SQL.
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
+
+from jarvis.models import Paper, Unit, UnitType
 
 SCHEMA_VERSION = 1
 
@@ -117,3 +120,91 @@ def open_store(path: str | Path) -> sqlite3.Connection:
 def close_store(conn: sqlite3.Connection) -> None:
     conn.commit()
     conn.close()
+
+
+def save_paper(conn: sqlite3.Connection, paper: Paper, raw_text: str = "",
+               depth: str = "metadata") -> None:
+    """Upsert a paper. Layer 0 `raw_text` is only ever written, never blanked."""
+    conn.execute(
+        """
+        INSERT INTO papers (paper_id, title, authors, year, venue, doi, arxiv_id, s2_id,
+                            abstract, citation_count, retracted, version, source_path,
+                            raw_text, depth)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(paper_id) DO UPDATE SET
+            title=excluded.title, authors=excluded.authors, year=excluded.year,
+            venue=excluded.venue, doi=excluded.doi, arxiv_id=excluded.arxiv_id,
+            s2_id=excluded.s2_id, abstract=excluded.abstract,
+            citation_count=excluded.citation_count, retracted=excluded.retracted,
+            version=excluded.version, source_path=excluded.source_path,
+            depth=excluded.depth,
+            raw_text=CASE WHEN excluded.raw_text != '' THEN excluded.raw_text
+                          ELSE papers.raw_text END
+        """,
+        (paper.paper_id, paper.title, json.dumps(list(paper.authors)), paper.year,
+         paper.venue, paper.doi, paper.arxiv_id, paper.s2_id, paper.abstract,
+         paper.citation_count, int(paper.retracted), paper.version, paper.source_path,
+         raw_text, depth),
+    )
+    conn.commit()
+
+
+def _row_to_paper(row: sqlite3.Row) -> Paper:
+    return Paper(
+        paper_id=row["paper_id"], title=row["title"],
+        authors=tuple(json.loads(row["authors"])), year=row["year"], venue=row["venue"],
+        doi=row["doi"], arxiv_id=row["arxiv_id"], s2_id=row["s2_id"],
+        abstract=row["abstract"], citation_count=row["citation_count"],
+        retracted=bool(row["retracted"]), version=row["version"],
+        source_path=row["source_path"],
+    )
+
+
+def get_paper(conn: sqlite3.Connection, paper_id: str) -> Paper | None:
+    row = conn.execute("SELECT * FROM papers WHERE paper_id = ?", (paper_id,)).fetchone()
+    return _row_to_paper(row) if row else None
+
+
+def get_raw_text(conn: sqlite3.Connection, paper_id: str) -> str:
+    row = conn.execute("SELECT raw_text FROM papers WHERE paper_id = ?", (paper_id,)).fetchone()
+    return row["raw_text"] if row else ""
+
+
+def save_units(conn: sqlite3.Connection, units: list[Unit]) -> None:
+    conn.executemany(
+        """
+        INSERT INTO units (unit_id, paper_id, type, page, section_path, verbatim_text,
+                           ordinal, context_prefix, parent_id, label)
+        VALUES (?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(unit_id) DO UPDATE SET
+            verbatim_text=excluded.verbatim_text,
+            context_prefix=excluded.context_prefix,
+            parent_id=excluded.parent_id, label=excluded.label
+        """,
+        [(u.unit_id, u.paper_id, u.type.value, u.page, json.dumps(list(u.section_path)),
+          u.verbatim_text, u.ordinal, u.context_prefix, u.parent_id, u.label)
+         for u in units],
+    )
+    conn.commit()
+
+
+def _row_to_unit(row: sqlite3.Row) -> Unit:
+    return Unit(
+        unit_id=row["unit_id"], paper_id=row["paper_id"], type=UnitType(row["type"]),
+        page=row["page"], section_path=tuple(json.loads(row["section_path"])),
+        verbatim_text=row["verbatim_text"], ordinal=row["ordinal"],
+        context_prefix=row["context_prefix"], parent_id=row["parent_id"],
+        label=row["label"],
+    )
+
+
+def get_units(conn: sqlite3.Connection, paper_id: str) -> list[Unit]:
+    rows = conn.execute(
+        "SELECT * FROM units WHERE paper_id = ? ORDER BY ordinal", (paper_id,)
+    ).fetchall()
+    return [_row_to_unit(r) for r in rows]
+
+
+def get_unit(conn: sqlite3.Connection, unit_id: str) -> Unit | None:
+    row = conn.execute("SELECT * FROM units WHERE unit_id = ?", (unit_id,)).fetchone()
+    return _row_to_unit(row) if row else None
