@@ -175,3 +175,105 @@ def test_saving_candidates_twice_does_not_duplicate_them(tmp_path):
         assert len(get_papers_by_depth(conn, "metadata")) == 2
     finally:
         close_store(conn)
+
+
+
+from jarvis.gather import expand_citations, gather
+
+GRAPH = {
+    "seed": [{"arxiv_id": "hop1", "title": "One Hop", "abstract": "a"}],
+    "hop1": [{"arxiv_id": "hop2", "title": "Two Hops", "abstract": "b"}],
+    "hop2": [{"arxiv_id": "hop3", "title": "Three Hops", "abstract": "c"}],
+}
+
+
+def _neighbors():
+    def refs(pid):
+        return [dict(p) for p in GRAPH.get(pid, [])]
+
+    def cites(pid):
+        return []
+
+    return refs, cites
+
+
+SEEDS = [{"arxiv_id": "seed", "title": "Seed", "abstract": "s"}]
+
+
+def test_expansion_records_the_hop_count_as_graph_depth():
+    found = expand_citations(SEEDS, _neighbors(), lambda p: 1.0, max_depth=2)
+    by_pid = {c.pid: c.graph_depth for c in found}
+    assert by_pid == {"hop1": 1, "hop2": 2}
+    assert all(c.origin == "citation" for c in found)
+
+
+def test_expansion_stops_at_max_depth():
+    found = expand_citations(SEEDS, _neighbors(), lambda p: 1.0, max_depth=1)
+    assert {c.pid for c in found} == {"hop1"}
+
+
+def test_the_seeds_themselves_are_never_returned():
+    found = expand_citations(SEEDS, _neighbors(), lambda p: 1.0, max_depth=3)
+    assert "seed" not in {c.pid for c in found}
+
+
+def test_low_scoring_neighbours_are_not_walked_through():
+    found = expand_citations(SEEDS, _neighbors(), lambda p: 0.1, threshold=0.5, max_depth=3)
+    assert found == []
+
+
+def test_expansion_respects_its_budget():
+    found = expand_citations(SEEDS, _neighbors(), lambda p: 1.0, max_depth=3, budget=1)
+    assert len(found) == 1
+
+
+def test_already_seen_papers_are_not_re_surfaced():
+    found = expand_citations(SEEDS, _neighbors(), lambda p: 1.0, max_depth=2,
+                             already_seen={"hop1"})
+    assert "hop1" not in {c.pid for c in found}
+
+
+def test_gather_merges_search_hits_and_citation_expansion():
+    def search(query):
+        return [dict(SEEDS[0])] if query == "seed topic" else []
+
+    cands = gather("seed topic", SearchPlan(question="seed topic", queries=("seed topic",)),
+                   search, neighbors=_neighbors(), score_fn=lambda p: 1.0, max_depth=1)
+    assert {c.pid for c in cands} == {"seed", "hop1"}
+    assert next(c for c in cands if c.pid == "seed").graph_depth == 0
+    assert next(c for c in cands if c.pid == "hop1").graph_depth == 1
+
+
+def test_gather_accepts_a_planner_and_builds_its_own_plan():
+    calls = []
+
+    def search(query):
+        calls.append(query)
+        return []
+
+    gather("gust rejection", TemplatePlanner(), search)
+    assert calls == list(TemplatePlanner().plan("gust rejection").queries)
+
+
+def test_gather_without_a_graph_is_just_the_searches():
+    def search(query):
+        return [dict(SEEDS[0])] if query == "q" else []
+
+    cands = gather("q", SearchPlan(question="q", queries=("q",)), search)
+    assert {c.pid for c in cands} == {"seed"}
+
+
+def test_gather_seeds_expansion_from_the_top_scoring_hits_only():
+    walked = []
+
+    def refs(pid):
+        walked.append(pid)
+        return []
+
+    def search(query):
+        return [{"arxiv_id": f"p{i}", "title": f"T{i}", "abstract": "x", "citation_count": i}
+                for i in range(5)]
+
+    gather("q", SearchPlan(question="q", queries=("q",)), search,
+           neighbors=(refs, lambda pid: []), score_fn=lambda p: 1.0, seed_limit=2)
+    assert len(walked) == 2, "only the top `seed_limit` hits are expanded from"

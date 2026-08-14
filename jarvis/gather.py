@@ -12,7 +12,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
-from jarvis.citation_graph import paper_id
+from jarvis.citation_graph import CitationWalker, paper_id
 from jarvis.models import Paper
 from jarvis.sources import dedup_papers
 from jarvis.store import save_paper
@@ -176,3 +176,71 @@ def save_candidates(conn: sqlite3.Connection, candidates: Sequence[Candidate]) -
     for candidate in candidates:
         save_paper(conn, to_paper(candidate), depth="metadata")
     return len(candidates)
+
+
+def expand_citations(seeds: Sequence[dict],
+                     neighbors: tuple[Callable[[str], list[dict]],
+                                      Callable[[str], list[dict]]],
+                     score_fn: Callable[[dict], float],
+                     *, threshold: float = 0.5, max_depth: int = 2, budget: int = 200,
+                     already_seen: set[str] | None = None) -> list[Candidate]:
+    """Walk references and citations outward, recording the exact hop count per paper.
+
+    `CitationWalker` BFS-expands correctly but returns a flat list, so this drives it one
+    hop at a time and feeds each level back as the next level's seeds. Hop count is the
+    gate's graph-proximity signal, and a flattened result would throw it away.
+
+    PaperQA2 found citation traversal materially improved retrieval recall, and recall
+    correlated with final answer accuracy — this is a recall tool, not a retrieval
+    substrate (spec §7A, §11).
+    """
+    fetch_refs, fetch_citations = neighbors
+    seen: set[str] = set(already_seen or ())
+    seen |= {pid for pid in (paper_id(s) for s in seeds) if pid}
+
+    out: list[Candidate] = []
+    frontier = list(seeds)
+    for depth in range(1, max_depth + 1):
+        if not frontier or len(out) >= budget:
+            break
+        walker = CitationWalker(
+            fetch_refs_fn=fetch_refs, fetch_citations_fn=fetch_citations,
+            score_fn=score_fn, threshold=threshold, max_depth=1,
+            budget=budget - len(out), already_seen=set(seen),
+        )
+        next_frontier: list[dict] = []
+        for paper in walker.walk(frontier):
+            pid = paper_id(paper)
+            if not pid or pid in seen:
+                continue
+            seen.add(pid)
+            out.append(Candidate(paper=paper, origin="citation", graph_depth=depth))
+            next_frontier.append(paper)
+            if len(out) >= budget:
+                break
+        frontier = next_frontier
+    return out
+
+
+def gather(question: str, planner: Planner | SearchPlan,
+           search_fn: Callable[[str], list[dict]], *,
+           neighbors: tuple[Callable[[str], list[dict]],
+                            Callable[[str], list[dict]]] | None = None,
+           score_fn: Callable[[dict], float] | None = None,
+           seed_limit: int = 20, threshold: float = 0.5, max_depth: int = 2,
+           budget: int = 200) -> list[Candidate]:
+    """Stage A end to end: plan, search every query, then walk out from the best hits.
+
+    `planner` may be a `Planner` or an already-built `SearchPlan`, so a caller can inspect
+    or hand-edit the plan before spending API calls on it.
+    """
+    plan = planner if isinstance(planner, SearchPlan) else planner.plan(question)
+    found = run_searches(plan, search_fn)
+    if neighbors is None or score_fn is None or not found:
+        return found
+
+    seeds = [c.paper for c in found[:seed_limit]]
+    expanded = expand_citations(seeds, neighbors, score_fn, threshold=threshold,
+                                max_depth=max_depth, budget=budget,
+                                already_seen={c.pid for c in found})
+    return found + expanded
