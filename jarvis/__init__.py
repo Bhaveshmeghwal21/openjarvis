@@ -7,13 +7,17 @@ location. See docs/specs/2026-08-11-research-corpus-agent-design.md.
 The verifiable single-paper core (spec build steps 1-5) is complete: storage, parsing,
 typed units, hybrid retrieval, and two-stage verification. Gather + gate (spec step 6) is
 now also complete: multi-source search, citation-graph expansion, a calibrated union gate
-with no exclude outcome, deep read into the corpus, and verified Layer 2 cards. Compile,
-MCP, contradiction detection, and long-form reports (spec steps 7-10) are not yet built.
+with no exclude outcome, deep read into the corpus, and verified Layer 2 cards. Compile
+— cited Q&A (spec step 7) is now also complete: end-to-end question answering with
+evidence capping, retrieval refinement, deterministic quote verification, and entailment
+filtering. MCP, contradiction detection, and long-form reports (spec steps 8-10) are not
+yet built.
 """
 from __future__ import annotations
 
 __version__ = "0.0.1"
 
+from jarvis.answer import Answer, ask, render_answer
 from jarvis.card import (
     CardExtractor,
     FakeCardExtractor,
@@ -26,7 +30,13 @@ from jarvis.citation_graph import CitationWalker, make_s2_neighbors, paper_id
 from jarvis.config import Config
 from jarvis.context import TemplatePrefix, apply_prefixes, embedding_text
 from jarvis.embed import BGEEmbedder, FakeEmbedder, index_units, vector_search
-from jarvis.evaluate import EvalReport, report
+from jarvis.evaluate import (
+    EvalReport,
+    citation_precision,
+    citation_recall,
+    report,
+)
+from jarvis.evidence import EvidenceSet, cap, order_for_context
 from jarvis.gate import (
     FakeVoter,
     LLMVoter,
@@ -65,6 +75,7 @@ from jarvis.models import (
 )
 from jarvis.parse import DoclingParser, FakeParser
 from jarvis.retrieve import CrossEncoderReranker, rrf, search
+from jarvis.retriever import FakeRefiner, LLMRefiner, Refiner, Retrieval, retrieve_iteratively
 from jarvis.router import CostTracker, ModelRouter
 from jarvis.scoring import citation_weight, cosine, make_cosine_scorer, paper_text, recency
 from jarvis.sources import (
@@ -101,9 +112,11 @@ from jarvis.store import (
 from jarvis.text import approx_tokens, find_span, normalize
 from jarvis.units import build_units
 from jarvis.verify import HFNLI, FakeNLI, verify_claim
+from jarvis.writer import Draft, FakeWriter, LLMWriter, Writer, claims_from_json
 
 __all__ = [
     "HFNLI",
+    "Answer",
     "BGEEmbedder",
     "Block",
     "Candidate",
@@ -116,19 +129,27 @@ __all__ = [
     "CostTracker",
     "CrossEncoderReranker",
     "DoclingParser",
+    "Draft",
     "EvalReport",
+    "EvidenceSet",
     "FakeCardExtractor",
     "FakeEmbedder",
     "FakeNLI",
     "FakeParser",
+    "FakeRefiner",
     "FakeVoter",
+    "FakeWriter",
     "IngestResult",
     "LLMCardExtractor",
     "LLMPlanner",
+    "LLMRefiner",
     "LLMVoter",
+    "LLMWriter",
     "ModelRouter",
     "Paper",
     "ParsedPaper",
+    "Refiner",
+    "Retrieval",
     "SearchPlan",
     "Signals",
     "TemplatePlanner",
@@ -138,13 +159,19 @@ __all__ = [
     "UnitType",
     "Verdict",
     "Verification",
+    "Writer",
     "all_units",
     "apply_prefixes",
     "approx_tokens",
+    "ask",
     "build_units",
     "calibrate",
     "calibration_report",
+    "cap",
+    "citation_precision",
+    "citation_recall",
     "citation_weight",
+    "claims_from_json",
     "close_store",
     "combine_sources",
     "cosine",
@@ -182,11 +209,14 @@ __all__ = [
     "normalize_openalex",
     "normalize_s2",
     "open_store",
+    "order_for_context",
     "paper_id",
     "paper_text",
     "read_labels",
     "recency",
+    "render_answer",
     "report",
+    "retrieve_iteratively",
     "rrf",
     "run_searches",
     "sample_seed",
