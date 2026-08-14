@@ -233,7 +233,7 @@ def screen(conn: sqlite3.Connection, candidates: Sequence[Candidate], question: 
 
 def calibrate(signal_rows: Mapping[str, Signals], labels: Mapping[str, bool],
               target_recall: float = GATE_RECALL_TARGET,
-              floor: float = MIN_CALIBRATED_THRESHOLD) -> Thresholds:
+              floor: float | None = None) -> Thresholds:
     """Fit per-signal thresholds to a hand-labeled seed set (spec §7B, §10).
 
     For each signal, sort the labeled-relevant papers' scores ascending and take the one
@@ -241,18 +241,30 @@ def calibrate(signal_rows: Mapping[str, Signals], labels: Mapping[str, bool],
     that bar on that signal alone; a union's recall is at least its best member's, so the
     union clears the target too.
 
-    `floor` keeps a degenerate signal (one where every labeled-relevant paper scores at
-    or near zero, e.g. a project's first gather with no citation-graph hits yet) from
-    being tuned down to a threshold so low that irrelevant candidates clear it too —
-    `decide()`'s comparison is `>=`, so a threshold of exactly 0.0 admits *everything*
-    scoring 0.0 on that signal, union or not, defeating the whole point of screening.
-    Defaults to `MIN_CALIBRATED_THRESHOLD` rather than 0.0 for this reason; pass `floor=0.0`
-    explicitly if a genuinely wide-open signal is intended.
+    `floor` protects against a *degenerate* signal (one where every labeled-relevant
+    paper scores exactly 0.0, e.g. graph proximity before any citation expansion has
+    produced a hit) being tuned down to a threshold of 0.0 — `decide()`'s comparison is
+    `>=`, so a threshold of exactly 0.0 admits *everything* scoring 0.0 on that signal,
+    defeating the whole point of screening.
+
+    Left unset (the default), the floor is `MIN_CALIBRATED_THRESHOLD` and is applied
+    *only* to a signal whose raw fit is exactly 0.0 — i.e. only to signals that are
+    genuinely degenerate. A signal with real, fine-grained separation clustered below
+    that value (small but non-zero scores that still distinguish relevant from
+    irrelevant papers) is left alone, so the automatic floor never itself narrows recall.
+
+    Passed explicitly, `floor` instead behaves as an unconditional minimum on every
+    signal's threshold — the caller has stated an intent stronger than "rescue dead
+    signals only," and every signal's fitted value is clamped up to at least `floor`
+    regardless of whether it was already above it.
     """
     relevant = [pid for pid, is_relevant in labels.items()
                 if is_relevant and pid in signal_rows]
     if not relevant:
         return Thresholds()
+
+    explicit_floor = floor is not None
+    effective_floor = floor if explicit_floor else MIN_CALIBRATED_THRESHOLD
 
     default = Thresholds()
     fitted: dict[str, float] = {}
@@ -260,7 +272,12 @@ def calibrate(signal_rows: Mapping[str, Signals], labels: Mapping[str, bool],
         scores = sorted(signal_rows[pid].as_dict()[name] for pid in relevant)
         index = int((1.0 - target_recall) * len(scores))
         index = max(0, min(index, len(scores) - 1))
-        fitted[name] = max(floor, scores[index])
+        raw = scores[index]
+
+        if explicit_floor:
+            fitted[name] = max(effective_floor, raw)
+        else:
+            fitted[name] = effective_floor if raw == 0.0 else raw
     return Thresholds(unsure_ratio=default.unsure_ratio, **fitted)
 
 

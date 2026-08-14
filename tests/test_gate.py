@@ -244,7 +244,7 @@ def test_gate_recall_reads_the_decisions_this_gate_produces(tmp_path):
 
 
 from jarvis.evaluate import GATE_RECALL_TARGET
-from jarvis.gate import calibrate, calibration_report
+from jarvis.gate import MIN_CALIBRATED_THRESHOLD, calibrate, calibration_report
 
 
 def _rows(n_relevant=20, n_irrelevant=80):
@@ -347,6 +347,38 @@ def test_calibration_never_produces_a_threshold_that_admits_a_zero_scoring_signa
     # those signals alone.
     irrelevant_only_degenerate = Signals(embedding=0.0, graph=0.0, keyword=0.0, llm_vote=0.0)
     assert decide(irrelevant_only_degenerate, thresholds) != "read_deep"
+
+
+def test_the_default_floor_does_not_sacrifice_recall_on_a_signal_with_real_separation():
+    """Re-review regression (post-2d/7a fix): the default MIN_CALIBRATED_THRESHOLD must
+    only rescue a genuinely *degenerate* signal (raw fit == 0.0), never clamp up a signal
+    whose relevant-paper scores are real but happen to cluster below that floor -- doing
+    so would drop recall below target for no reason, since a signal with true separation
+    below the floor doesn't need the floor's protection at all."""
+    rows = {}
+    for i in range(20):
+        rows[f"r{i}"] = Signals(embedding=0.01 + i * 0.002, graph=0.0, keyword=0.0,
+                                llm_vote=0.0)
+    for i in range(80):
+        rows[f"n{i}"] = Signals(embedding=0.0, graph=0.0, keyword=0.0, llm_vote=0.0)
+    labels = {pid: pid.startswith("r") for pid in rows}
+
+    thresholds = calibrate(rows, labels, target_recall=0.95)
+    report = calibration_report(rows, labels, thresholds)
+    assert report["recall"] >= 0.95
+    assert thresholds.embedding < MIN_CALIBRATED_THRESHOLD, (
+        "the raw fit (0.012) has genuine separation and must not be clamped up"
+    )
+
+
+def test_an_explicit_floor_is_unconditional_even_when_the_raw_fit_is_nonzero():
+    """The plan's own Task 9 fixture: r0 is a deliberately hard outlier scoring 0.05 on
+    every signal, which the raw fit would keep as-is at target_recall=1.0. An explicitly
+    passed floor=0.2 must still win, unlike the conditional default floor -- an explicit
+    floor is a stronger, unconditional statement of intent from the caller."""
+    rows = _rows()
+    thresholds = calibrate(rows, _labels(rows), target_recall=1.0, floor=0.2)
+    assert thresholds.embedding >= 0.2
 
 
 def test_an_explicit_zero_floor_still_works_when_the_caller_wants_it():
