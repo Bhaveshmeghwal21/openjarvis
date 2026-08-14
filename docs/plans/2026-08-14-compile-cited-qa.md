@@ -1790,3 +1790,324 @@ Single-question, single-pass answers. Not built here:
 | Multi-section long-form reports | `docs/plans/2026-08-14-longform-reports.md` |
 
 One deliberate simplification to revisit with real usage: `ask` treats the question as a single unit. Spec §9 gives `retriever` and `writer` a **sub-question** each, with fan-out. The long-form report plan builds that decomposition, and `ask` should adopt it once outline-driven sub-questions exist rather than growing a second, parallel decomposer here.
+
+---
+
+## Final whole-branch review — fix wave (post-Task-6, human ruling)
+
+The final whole-branch adversarial review, dispatched on the most capable available model
+after all 6 tasks passed their own scoped reviews, found 1 Critical + 5 Important findings.
+All traced to this plan's own reference code (verbatim, not implementer deviation). Two of
+the reviewer's claims were independently re-verified before presenting anything to the
+human partner: the Critical finding was reproduced directly against the real store, and the
+Important finding about Task 2's fix having no real regression test was confirmed by
+reverting `jarvis/retriever.py` to its pre-fix (round-block-concatenation) version and
+observing all 14 `test_retriever.py` tests still pass.
+
+Five of the six findings were ruled into this fix wave; one — Task 2's missing regression
+test — was ruled **out** and is parked below, not fixed.
+
+### Fix 1 (Critical): a blocked claim's text can render under a citation
+
+**Finding.** `Answer.claim_for` (`jarvis/answer.py`) resolves a claim by `claim_id` via
+first-match: `next((c for c in self.claims if c.claim_id == claim_id), None)`.
+`verifications` is index-aligned to `claims` by construction in `ask()`
+(`tuple(verify_claim(...) for claim in draft.claims)`), but `render_answer` looks claims up
+by id through `claim_for` rather than by position. If two claims in one `Draft` ever share
+a `claim_id`, `claim_for` always returns the *first* one — so a `SUPPORTED` verdict for the
+second claim gets attached to the first claim's `Claim` object when rendering, and vice
+versa for a `QUOTE_NOT_FOUND` verdict. The reviewer demonstrated this directly: a draft with
+two claims sharing one id, one fabricated (blocked) and one grounded (supported), rendered
+the *fabricated* claim's text under a citation in the "supported" section, while the footer
+simultaneously reported "1 claim(s) were removed."
+
+No writer shipped in this branch can trigger it today — `claims_from_json` numbers ids
+`f"{prefix}-{len(out)}"`, unique within one call, and every `FakeWriter`/`FakeParser` test
+fixture in this plan hand-writes unique ids. The exposure is that `Writer` is a
+`typing.Protocol` — an untrusted boundary by design — and nothing on the consuming side
+(`ask()`/`Answer`) enforces the uniqueness the rendering logic silently depends on. This
+directly contradicts the plan's own binding constraint: *"A claim whose quote is not found
+is removed from the answer, never merely annotated."*
+
+**Fix.** Minimal and API-preserving, per the reviewer's own recommendation: guarantee
+unique `claim_id`s on every `Draft` before verification runs, inside `ask()`, rather than
+restructuring `Answer`'s public shape (which would touch every existing test and the not-
+yet-built MCP-server plan, which already queued the same `claim_for` pattern twice).
+
+Add to `jarvis/answer.py`, after the existing imports (extend `from dataclasses import
+dataclass` to `from dataclasses import dataclass, replace`, and add
+`from collections.abc import Sequence`):
+
+```python
+def _dedupe_claim_ids(claims: tuple[Claim, ...]) -> tuple[Claim, ...]:
+    """Guarantee unique claim_ids within one draft.
+
+    `Answer.claim_for` resolves by first-match id lookup; `verifications` is index-aligned
+    to `claims` by construction. `Writer` is an untrusted `typing.Protocol` boundary — a
+    well-behaved implementation (`claims_from_json`) already produces unique ids, but
+    nothing enforces it structurally. Without this, two claims sharing an id let a later
+    claim's verdict get attached to an earlier, unrelated claim's text via first-match
+    lookup — including rendering a BLOCKED claim's fabricated text as if it were the
+    SUPPORTED claim that happens to share its id.
+    """
+    seen: set[str] = set()
+    out: list[Claim] = []
+    for i, claim in enumerate(claims):
+        if claim.claim_id in seen:
+            out.append(replace(claim, claim_id=f"dedup-{i}"))
+        else:
+            seen.add(claim.claim_id)
+            out.append(claim)
+    return tuple(out)
+```
+
+### Fix 2 (Important): `ask()` never re-checks a citation against its own evidence set
+
+**Finding.** The "no citation outside the bounded evidence set" rule lives only inside
+`claims_from_json` — one implementation of the `Writer` protocol. `ask()` itself hands
+`writer.write()` a capped, ordered evidence list but never verifies afterward that every
+claim it gets back actually cites a `unit_id` from that list. The reviewer demonstrated a
+writer citing a unit outside its shown evidence rendering successfully (the quote was real,
+so nothing fabricated shipped, but the citation pointed at content the writer was never
+given). This makes "every section gets its own bounded evidence set" a convention one
+`Writer` implementation happens to honor, not a mechanical guarantee `ask()` enforces.
+
+**Fix.** Add alongside `_dedupe_claim_ids`:
+
+```python
+def _drop_citations_outside_evidence(claims: tuple[Claim, ...],
+                                     evidence: Sequence[Unit]) -> tuple[Claim, ...]:
+    """Drop any claim citing a unit_id outside the bounded evidence set it was shown.
+
+    `claims_from_json` already enforces this inside one `Writer` implementation, but
+    `Writer` is an untrusted Protocol boundary. A real quote from an out-of-budget unit
+    would ground and render as if it came from evidence `ask()` actually bounded and
+    ordered — the same class of gap `claims_from_json`'s own rejection rules exist to
+    close, just unenforced on the consuming side.
+    """
+    known = {u.unit_id for u in evidence}
+    return tuple(c for c in claims if c.unit_id in known)
+```
+
+Wire both fixes into `ask()` — replace the body from `draft = writer.write(...)` onward:
+
+```python
+    draft = writer.write(question, evidence)
+    claims = _dedupe_claim_ids(draft.claims)
+    claims = _drop_citations_outside_evidence(claims, evidence)
+    verifications = tuple(verify_claim(conn, claim, nli, threshold=threshold)
+                          for claim in claims)
+
+    return Answer(question=question, text=draft.text, claims=claims,
+                  verifications=verifications, units=tuple(evidence),
+                  queries=retrieval.queries, dropped_evidence=budget.dropped)
+```
+
+Add tests to `tests/test_answer.py` proving both fixes:
+
+```python
+def test_two_claims_sharing_an_id_never_let_one_render_as_the_other(corpus):
+    unit = _prose_unit(corpus)
+    writer = FakeWriter({QUESTION: Draft(
+        text="x",
+        claims=(
+            Claim("dup", "It reaches 99.9% accuracy.", unit.unit_id,
+                  "reaches 99.9% tracking accuracy"),   # fabricated, will be blocked
+            Claim("dup", "It reaches 94.2% accuracy.", unit.unit_id,
+                  "reaches 94.2% tracking accuracy"),   # grounded, will be supported
+        ))})
+    answer = ask(corpus, QUESTION, FakeEmbedder(), writer, ENTAILS)
+    rendered = render_answer(answer)
+    assert "99.9" not in rendered, "the blocked claim's fabricated text must never render"
+    assert "94.2" in rendered
+
+
+def test_a_claim_citing_a_unit_outside_the_evidence_set_is_dropped_before_verification(corpus):
+    writer = FakeWriter({QUESTION: Draft(
+        text="x",
+        claims=(Claim("c-0", "invented", "not-a-real-unit-id", "some quote"),))})
+    answer = ask(corpus, QUESTION, FakeEmbedder(), writer, ENTAILS)
+    assert answer.claims == ()
+    assert answer.verifications == ()
+```
+
+### Fix 3 (Important): primacy/recency ordering inside `ask()` is unverified
+
+**Finding.** `order_for_context` is unit-tested in isolation (`tests/test_evidence.py`),
+but nothing tests that `ask()` actually calls it rather than, say, `reversed()` or nothing
+at all. The reviewer swapped `order_for_context(budget.units)` for
+`list(reversed(order_for_context(budget.units)))` in `jarvis/answer.py` and the full suite
+stayed green. The plan calls this ordering "load-bearing" (evidence.py's own module
+docstring); nothing in this plan's tests would notice it silently breaking.
+
+**Fix.** Replace `test_the_writer_only_ever_sees_capped_ordered_evidence` in
+`tests/test_answer.py` (the shared 3-unit `corpus` fixture from the Task 4 fix already has
+exactly 3 units, which is enough to make front/back interleaving distinguishable from
+plain rank order — no fixture change needed):
+
+```python
+def test_the_writer_only_ever_sees_capped_ordered_evidence(corpus):
+    from jarvis.evidence import cap, order_for_context
+    from jarvis.retriever import retrieve_iteratively
+
+    seen = {}
+
+    class SpyWriter:
+        def write(self, question, units):
+            seen["units"] = list(units)
+            return Draft()
+
+    ask(corpus, QUESTION, FakeEmbedder(), SpyWriter(), ENTAILS, limit=8, max_units=3)
+
+    retrieval = retrieve_iteratively(corpus, QUESTION, FakeEmbedder(), limit=8)
+    expected = order_for_context(cap(retrieval.units, max_units=3).units)
+    assert [u.unit_id for u in seen["units"]] == [u.unit_id for u in expected], \
+        "ask() must hand the writer order_for_context's interleave, not raw rank order"
+```
+
+This independently recomputes the expected order using the same primitives `ask()` calls
+internally and compares the writer's actual input against it — genuinely mutation-
+sensitive, unlike the original assertion (which only checked a count).
+
+### Fix 4 (Important): the "no retrievable evidence" tests never exercise empty retrieval
+
+**Finding.** `test_a_question_with_no_retrievable_evidence_answers_nothing` and
+`test_an_empty_answer_renders_an_explicit_no_evidence_message` both query the shared
+3-unit `corpus` fixture with a nonsense string. The reviewer confirmed
+`retrieve_iteratively` still returns **all 3 units** for that query — `FakeEmbedder`'s
+vector search has no relevance floor, so it always ranks every candidate. Both tests only
+pass because `FakeWriter({})` returns an empty `Draft()` for an unmapped question key, not
+because retrieval was actually empty. This is the fourth instance of the same root cause
+already fixed twice in this plan (Tasks 4 and 6): a fixture too small or too uniform to
+distinguish working code from broken code.
+
+**Fix.** Point both tests at a genuinely empty store instead of the shared fixture:
+
+```python
+def test_a_question_with_no_retrievable_evidence_answers_nothing(tmp_path):
+    empty = open_store(tmp_path / "empty.db")
+    try:
+        answer = ask(empty, QUESTION, FakeEmbedder(), FakeWriter({}), ENTAILS)
+        assert answer.claims == ()
+        assert answer.is_grounded is False
+    finally:
+        close_store(empty)
+
+
+def test_an_empty_answer_renders_an_explicit_no_evidence_message(tmp_path):
+    empty = open_store(tmp_path / "empty.db")
+    try:
+        answer = ask(empty, QUESTION, FakeEmbedder(), FakeWriter({}), ENTAILS)
+        assert "no" in render_answer(answer).lower()
+    finally:
+        close_store(empty)
+```
+
+An empty store has no rows in `units`, `units_fts`, or `embeddings`, so `search()` returns
+`[]` from both the keyword and vector paths — this now exercises the real empty-retrieval
+path, not just the writer's own empty-draft fallback.
+
+### Fix 5 (Important): a dead model reads to the user as an empty corpus
+
+**Finding.** `LLMWriter.write` and `LLMRefiner.refine` (both `except Exception:` blocks)
+swallow every model failure — network errors, an expired API key, malformed JSON — with no
+logging anywhere in either module. An operator whose `JARVIS_API_KEY` has expired gets back
+`"No evidence in this corpus answers that question."`: a confident, specific, and false
+statement about the corpus. Not a plan-conflict (the plan never mandated logging — this is
+a robustness gap it never covered), so no arbitration was needed, but it was bundled into
+this fix wave since it's small and touches files already being changed.
+
+**Fix.** Add a module-level logger to `jarvis/writer.py` and `jarvis/retriever.py`:
+
+```python
+import logging
+
+_LOGGER = logging.getLogger(__name__)
+```
+
+In `jarvis/writer.py`'s `LLMWriter.write`, change:
+
+```python
+        except Exception:  # noqa: BLE001
+            return Draft()
+```
+
+to:
+
+```python
+        except Exception:  # noqa: BLE001
+            _LOGGER.warning("writer model call failed; the corpus will read as having no "
+                            "evidence for this question", exc_info=True)
+            return Draft()
+```
+
+In `jarvis/retriever.py`'s `LLMRefiner.refine`, change:
+
+```python
+        except Exception:  # noqa: BLE001 - a dead refiner ends the loop, never the answer
+            return None
+```
+
+to:
+
+```python
+        except Exception:  # noqa: BLE001 - a dead refiner ends the loop, never the answer
+            _LOGGER.warning("retrieval refiner model call failed; stopping refinement early",
+                            exc_info=True)
+            return None
+```
+
+Add regression tests using pytest's `caplog` fixture — to `tests/test_writer.py`:
+
+```python
+def test_llm_writer_logs_a_warning_on_failure(caplog):
+    def boom(*args, **kwargs):
+        raise RuntimeError("no key")
+
+    with caplog.at_level("WARNING"):
+        LLMWriter(_Router(), chat_fn=boom).write("q", UNITS)
+    assert any("failed" in r.message.lower() for r in caplog.records)
+```
+
+and to `tests/test_retriever.py`:
+
+```python
+def test_llm_refiner_logs_a_warning_on_failure(caplog):
+    def boom(*args, **kwargs):
+        raise RuntimeError("down")
+
+    with caplog.at_level("WARNING"):
+        LLMRefiner(_Router(), chat_fn=boom).refine("q", ("q",), [])
+    assert any("failed" in r.message.lower() for r in caplog.records)
+```
+
+### Parked, not fixed: Task 2's RRF fix has no regression test
+
+**Finding.** Confirmed by direct reproduction: reverting `jarvis/retriever.py` to its
+pre-fix state (`git show 9ce6a9b:jarvis/retriever.py`, round-block concatenation instead of
+RRF fusion) and running `tests/test_retriever.py` leaves all 14 tests passing. The Task 2
+amendment's own corrected dedup test (`test_units_are_deduped_across_rounds`) only asserts
+id-uniqueness and round count, both of which round-block concatenation already satisfies —
+it never asserts anything about *order*, so it cannot distinguish the fix from the bug it
+was written to catch. This is a real gap in that amendment's own reasoning, not just the
+original implementer's.
+
+**Ruling: not fixed in this branch.** Human-ruled to exclude from this fix wave (2 of 3
+Important items presented were selected; this was the one declined). Documented here so it
+is never silently dropped. A genuinely discriminating test would need a `FakeReranker`
+(already exists in `jarvis/retrieve.py`) forcing round 1 to rank a weak unit last and round
+2 to rank a strong unit first, then asserting the round-2 unit precedes the round-1 tail
+unit in `result.units` — left as a follow-up, not blocking this plan's completion.
+
+### Explicitly out of scope: `verify.py`'s paper-level quote fallback
+
+`jarvis.verify.quote_is_grounded`'s fallback to `find_span(quote, get_raw_text(conn,
+unit.paper_id))` — pre-existing code from the already-merged single-paper-core plan,
+unchanged by this branch's diff — lets a quote that exists only in a *different* unit of
+the same paper still ground a claim citing the *wrong* unit. The reviewer confirmed this
+directly, and correctly scoped it as **not a merge blocker for this branch**: the root
+cause predates this plan entirely, and the fallback exists for a real reason (quotes
+spanning parent/child unit boundaries). This branch is the first code that renders
+`[unit_id]` to a human as a specific location claim, which is what turns a tolerable
+internal looseness into a user-visible misattribution risk — worth a dedicated follow-up
+task against `jarvis/verify.py` itself, not a change bundled into this plan.
