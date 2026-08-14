@@ -371,6 +371,21 @@ def test_the_default_floor_does_not_sacrifice_recall_on_a_signal_with_real_separ
     )
 
 
+def test_a_near_zero_float_from_floating_point_noise_still_counts_as_degenerate():
+    """Second re-review finding: a raw fit of 1e-17 (plausible floating-point noise from
+    a cosine-similarity computation) is degenerate in every practical sense but is not
+    bit-exact 0.0. The default floor must still rescue it, not just literal 0.0."""
+    rows = {}
+    for i in range(20):
+        rows[f"r{i}"] = Signals(embedding=1e-17, graph=0.0, keyword=0.9, llm_vote=0.0)
+    for i in range(80):
+        rows[f"n{i}"] = Signals(embedding=0.0, graph=0.0, keyword=0.02, llm_vote=0.0)
+    labels = {pid: pid.startswith("r") for pid in rows}
+
+    thresholds = calibrate(rows, labels)
+    assert thresholds.embedding == MIN_CALIBRATED_THRESHOLD
+
+
 def test_an_explicit_floor_is_unconditional_even_when_the_raw_fit_is_nonzero():
     """The plan's own Task 9 fixture: r0 is a deliberately hard outlier scoring 0.05 on
     every signal, which the raw fit would keep as-is at target_recall=1.0. An explicitly

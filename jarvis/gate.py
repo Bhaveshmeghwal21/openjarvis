@@ -172,6 +172,12 @@ KEPT = ("read_deep", "unsure")   # matches jarvis.evaluate.KEPT_DECISIONS
 # which is the entire gather set for most signals. See Finding 2d/7a in the final review.
 MIN_CALIBRATED_THRESHOLD = 0.05
 
+# A raw quantile-fit value at or below this counts as "degenerate" for the purpose of the
+# default floor rescue, rather than requiring bit-exact 0.0 — a signal computed through
+# floating-point operations (cosine similarity, division) can land on a tiny nonzero
+# value instead of a clean zero while still being degenerate in every practical sense.
+_DEGENERATE_EPSILON = 1e-9
+
 
 @dataclass(frozen=True)
 class Thresholds:
@@ -248,10 +254,12 @@ def calibrate(signal_rows: Mapping[str, Signals], labels: Mapping[str, bool],
     defeating the whole point of screening.
 
     Left unset (the default), the floor is `MIN_CALIBRATED_THRESHOLD` and is applied
-    *only* to a signal whose raw fit is exactly 0.0 — i.e. only to signals that are
-    genuinely degenerate. A signal with real, fine-grained separation clustered below
-    that value (small but non-zero scores that still distinguish relevant from
-    irrelevant papers) is left alone, so the automatic floor never itself narrows recall.
+    *only* to a signal whose raw quantile-fit value (the score actually selected as its
+    threshold) is at or indistinguishably close to 0.0 — i.e. only to signals that are
+    genuinely degenerate at the value that would become their threshold. A signal with
+    real, fine-grained separation clustered below that value (small but non-zero scores
+    that still distinguish relevant from irrelevant papers) is left alone, so the
+    automatic floor never itself narrows recall.
 
     Passed explicitly, `floor` instead behaves as an unconditional minimum on every
     signal's threshold — the caller has stated an intent stronger than "rescue dead
@@ -277,7 +285,7 @@ def calibrate(signal_rows: Mapping[str, Signals], labels: Mapping[str, bool],
         if explicit_floor:
             fitted[name] = max(effective_floor, raw)
         else:
-            fitted[name] = effective_floor if raw == 0.0 else raw
+            fitted[name] = effective_floor if raw <= _DEGENERATE_EPSILON else raw
     return Thresholds(unsure_ratio=default.unsure_ratio, **fitted)
 
 
