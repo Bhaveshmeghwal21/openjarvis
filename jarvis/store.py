@@ -12,7 +12,7 @@ import json
 import sqlite3
 from pathlib import Path
 
-from jarvis.models import Paper, Unit, UnitType
+from jarvis.models import Card, CardField, Paper, Unit, UnitType
 
 SCHEMA_VERSION = 1
 
@@ -32,7 +32,7 @@ CREATE TABLE IF NOT EXISTS papers (
     version        TEXT NOT NULL DEFAULT '',
     source_path    TEXT NOT NULL DEFAULT '',
     raw_text       TEXT NOT NULL DEFAULT '',     -- Layer 0, immutable
-    depth          TEXT NOT NULL DEFAULT 'metadata'  -- metadata | abstract | deep
+    depth          TEXT NOT NULL DEFAULT 'metadata'  -- metadata | abstract | pending_deep | deep
 );
 
 CREATE TABLE IF NOT EXISTS units (
@@ -213,3 +213,152 @@ def get_units(conn: sqlite3.Connection, paper_id: str) -> list[Unit]:
 def get_unit(conn: sqlite3.Connection, unit_id: str) -> Unit | None:
     row = conn.execute("SELECT * FROM units WHERE unit_id = ?", (unit_id,)).fetchone()
     return _row_to_unit(row) if row else None
+
+
+
+# --- screening log (spec §7B: every decision auditable and re-runnable) -------------
+
+
+def save_screen_decision(conn: sqlite3.Connection, paper_id: str, decision: str,
+                         signals: dict, run_id: str = "") -> None:
+    """Record one gate decision with the per-signal scores that produced it.
+
+    The scores are the whole point: a decision without them cannot be audited, and a
+    threshold cannot be recalibrated without re-fetching every abstract.
+    """
+    conn.execute(
+        """
+        INSERT INTO screen_log (paper_id, run_id, decision, signals) VALUES (?,?,?,?)
+        ON CONFLICT(paper_id, run_id) DO UPDATE SET
+            decision=excluded.decision, signals=excluded.signals
+        """,
+        (paper_id, run_id, decision, json.dumps(signals or {})),
+    )
+    conn.commit()
+
+
+def get_screen_decisions(conn: sqlite3.Connection, run_id: str = "") -> dict[str, str]:
+    rows = conn.execute(
+        "SELECT paper_id, decision FROM screen_log WHERE run_id = ?", (run_id,)
+    ).fetchall()
+    return {r["paper_id"]: r["decision"] for r in rows}
+
+
+def get_screen_signals(conn: sqlite3.Connection, run_id: str = "") -> dict[str, dict]:
+    rows = conn.execute(
+        "SELECT paper_id, signals FROM screen_log WHERE run_id = ?", (run_id,)
+    ).fetchall()
+    return {r["paper_id"]: json.loads(r["signals"]) for r in rows}
+
+
+# --- Layer 2 cards -----------------------------------------------------------------
+
+
+def _field_to_dict(field: CardField | None) -> dict | None:
+    if field is None:
+        return None
+    return {"value": field.value, "unit_id": field.unit_id, "quote": field.quote,
+            "binding_verified": field.binding_verified}
+
+
+def _field_from_dict(data: dict | None) -> CardField | None:
+    if not data:
+        return None
+    return CardField(value=data.get("value", ""), unit_id=data.get("unit_id", ""),
+                     quote=data.get("quote", ""),
+                     binding_verified=bool(data.get("binding_verified", False)))
+
+
+_CARD_TUPLES = ("datasets", "metrics", "claims", "limitations")
+_CARD_SINGLES = ("problem", "method")
+
+
+def save_card(conn: sqlite3.Connection, card: Card) -> None:
+    payload = {name: _field_to_dict(getattr(card, name)) for name in _CARD_SINGLES}
+    payload.update(
+        {name: [_field_to_dict(f) for f in getattr(card, name)] for name in _CARD_TUPLES}
+    )
+    conn.execute(
+        """
+        INSERT INTO cards (paper_id, payload) VALUES (?,?)
+        ON CONFLICT(paper_id) DO UPDATE SET payload=excluded.payload
+        """,
+        (card.paper_id, json.dumps(payload)),
+    )
+    conn.commit()
+
+
+def get_card(conn: sqlite3.Connection, paper_id: str) -> Card | None:
+    row = conn.execute("SELECT payload FROM cards WHERE paper_id = ?", (paper_id,)).fetchone()
+    if row is None:
+        return None
+    data = json.loads(row["payload"])
+    kwargs = {name: _field_from_dict(data.get(name)) for name in _CARD_SINGLES}
+    kwargs.update(
+        {name: tuple(f for f in (_field_from_dict(d) for d in data.get(name, [])) if f)
+         for name in _CARD_TUPLES}
+    )
+    return Card(paper_id=paper_id, **kwargs)
+
+
+# --- runs, depth, corpus-wide reads -------------------------------------------------
+
+
+def save_run(conn: sqlite3.Connection, run_id: str, question: str = "",
+             started_at: str = "", cost_usd: float = 0.0) -> None:
+    conn.execute(
+        """
+        INSERT INTO runs (run_id, question, started_at, cost_usd) VALUES (?,?,?,?)
+        ON CONFLICT(run_id) DO UPDATE SET
+            question=excluded.question, started_at=excluded.started_at,
+            cost_usd=excluded.cost_usd
+        """,
+        (run_id, question, started_at, cost_usd),
+    )
+    conn.commit()
+
+
+def get_run(conn: sqlite3.Connection, run_id: str) -> dict | None:
+    row = conn.execute("SELECT * FROM runs WHERE run_id = ?", (run_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def set_depth(conn: sqlite3.Connection, paper_id: str, depth: str) -> None:
+    """Promote or demote a paper's ingest depth. Never deletes; `defer` is demotion.
+
+    Raises if `paper_id` has no row yet, rather than silently updating zero rows. A
+    caller that screens a candidate before saving it (e.g. citation-expanded candidates
+    from `expand_citations` persisted separately from search hits) would otherwise get no
+    error and no depth change, while `screen_log` still records a decision for a paper
+    that the corpus proper has no record of at all.
+    """
+    cursor = conn.execute("UPDATE papers SET depth = ? WHERE paper_id = ?", (depth, paper_id))
+    if cursor.rowcount == 0:
+        raise ValueError(
+            f"set_depth: no paper row for paper_id={paper_id!r} — save it first "
+            "(e.g. via save_paper/save_candidates) before screening or ingesting it"
+        )
+    conn.commit()
+
+
+def get_papers_by_depth(conn: sqlite3.Connection, depth: str) -> list[Paper]:
+    rows = conn.execute(
+        "SELECT * FROM papers WHERE depth = ? ORDER BY paper_id", (depth,)
+    ).fetchall()
+    return [_row_to_paper(r) for r in rows]
+
+
+def all_units(conn: sqlite3.Connection, exclude_paper_id: str | None = None) -> list[Unit]:
+    """Every unit in the corpus, optionally excluding one paper's own units.
+
+    The exclusion is what makes cross-paper contradiction search possible without a
+    paper contradicting itself.
+    """
+    if exclude_paper_id is None:
+        rows = conn.execute("SELECT * FROM units ORDER BY paper_id, ordinal").fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM units WHERE paper_id != ? ORDER BY paper_id, ordinal",
+            (exclude_paper_id,),
+        ).fetchall()
+    return [_row_to_unit(r) for r in rows]
