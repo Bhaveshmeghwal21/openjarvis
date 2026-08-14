@@ -1699,6 +1699,76 @@ git commit -m "test: end-to-end cited question answering"
 
 ---
 
+**Amended post-implementation** (Task 6 review, plan-conflict, human ruling: fix now,
+test-only, scoped to this one test):
+
+`test_the_evidence_reaching_the_writer_is_never_the_whole_corpus`, as given above, reuses
+the file's shared `corpus` fixture — six blocks producing exactly **3** total units (2
+prose + 1 table; the caption binds to the table rather than becoming its own unit). With
+`max_units=3` against a 3-unit corpus, `cap()` has nothing to truncate: the assertion
+`seen["count"] <= 3` passes identically whether or not `ask()` calls `cap()` at all. Same
+category as the Task 4 finding — production code already correct, test-coverage gap only.
+
+Fix: give this one test its own larger, self-contained corpus (5 sections, verified to
+produce 5 units — well over `max_units=3`) instead of the shared fixture, so the cap has
+something real to enforce, and strengthen the assertion accordingly. Scoped to this test
+alone — the shared `corpus`/`BLOCKS` fixture and every other test in the file are
+untouched:
+
+```python
+def test_the_evidence_reaching_the_writer_is_never_the_whole_corpus(tmp_path):
+    """Its own 5-unit corpus, not the shared 3-unit fixture — the cap needs something to
+    actually cut, or this test cannot tell a working cap from a deleted one."""
+    blocks = [
+        Block(kind="heading", text="Results", page=1, section_path=("Results",)),
+        Block(kind="paragraph", text="The controller reaches 94.2% tracking accuracy.",
+              page=1, section_path=("Results",)),
+        Block(kind="heading", text="Limitations", page=2, section_path=("Limitations",)),
+        Block(kind="paragraph", text="Performance degrades above 12 m/s wind speed.",
+              page=2, section_path=("Limitations",)),
+        Block(kind="heading", text="Related Work", page=3, section_path=("Related Work",)),
+        Block(kind="paragraph", text="Prior controllers used fixed-gain PID schemes.",
+              page=3, section_path=("Related Work",)),
+        Block(kind="heading", text="Discussion", page=4, section_path=("Discussion",)),
+        Block(kind="paragraph", text="Future work should explore adaptive gain scheduling.",
+              page=4, section_path=("Discussion",)),
+        Block(kind="heading", text="Conclusion", page=5, section_path=("Conclusion",)),
+        Block(kind="paragraph", text="The approach generalizes to other wind regimes.",
+              page=5, section_path=("Conclusion",)),
+    ]
+    conn = open_store(tmp_path / "big_corpus.db")
+    paper = Paper(paper_id="p2", title="A Larger Paper", year=2025)
+    parsed = FakeParser(blocks).parse("big.pdf", "p2")
+    save_paper(conn, paper, raw_text=parsed.raw_text, depth="deep")
+    units = apply_prefixes(build_units(parsed), paper, TemplatePrefix())
+    save_units(conn, units)
+    index_units_fts(conn, units)
+    index_units(conn, units, FakeEmbedder())
+
+    seen = {}
+
+    class SpyWriter:
+        def write(self, question, units):
+            seen["count"] = len(units)
+            return Draft()
+
+    answer = ask(conn, "how accurate is the controller under wind?", FakeEmbedder(),
+                 SpyWriter(), ENTAILS, limit=20, max_units=3)
+    close_store(conn)
+
+    assert seen["count"] == 3
+    assert answer.dropped_evidence > 0, "5 candidate units and max_units=3 must genuinely " \
+                                        "drop at least one"
+```
+
+Verified directly before writing this amendment: `build_units` on the blocks above produces
+exactly 5 prose units (one per section), so with the generous `limit=20` used here, `search()`
+returns all 5 before `cap()` truncates to 3 — `dropped_evidence` will be `2`. If a real test
+run shows otherwise, investigate why (is `search()` genuinely retrieving fewer than 5 for
+this question?) rather than weakening the assertion back to `<= 3`.
+
+---
+
 ## Definition of done
 
 - `python -m pytest` passes with zero network access, no API keys, no model downloads.
