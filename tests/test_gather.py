@@ -74,3 +74,104 @@ def test_search_plan_is_frozen():
     plan = SearchPlan(question="q")
     with pytest.raises(dataclasses.FrozenInstanceError):
         plan.question = "other"
+
+
+
+from jarvis.gather import Candidate, run_searches, save_candidates, to_paper
+from jarvis.store import close_store, get_paper, get_papers_by_depth, open_store
+
+CORPUS = {
+    "gust rejection": [
+        {"arxiv_id": "2501.00001", "title": "Gust-Robust Control", "abstract": "a",
+         "year": 2025, "citation_count": 42, "doi": "10.1/a"},
+    ],
+    "gust rejection survey": [
+        {"arxiv_id": "2501.00001", "title": "Gust-Robust Control", "abstract": "a"},
+        {"arxiv_id": "2501.00002", "title": "A Survey of Wind Rejection", "abstract": "b"},
+    ],
+}
+
+
+def fake_search(query: str) -> list[dict]:
+    return [dict(p) for p in CORPUS.get(query, [])]
+
+
+def test_run_searches_visits_every_query_in_the_plan():
+    seen = []
+
+    def spy(query):
+        seen.append(query)
+        return []
+
+    plan = TemplatePlanner().plan("gust rejection")
+    run_searches(plan, spy)
+    assert seen == list(plan.queries)
+
+
+def test_a_paper_found_by_two_queries_appears_once_carrying_both():
+    plan = SearchPlan(question="gust rejection",
+                      queries=("gust rejection", "gust rejection survey"))
+    cands = run_searches(plan, fake_search)
+    assert len(cands) == 2
+    first = next(c for c in cands if c.pid == "2501.00001")
+    assert first.queries == ("gust rejection", "gust rejection survey")
+
+
+def test_search_candidates_are_at_graph_depth_zero():
+    cands = run_searches(SearchPlan(question="q", queries=("gust rejection",)), fake_search)
+    assert cands[0].origin == "search"
+    assert cands[0].graph_depth == 0
+
+
+def test_a_failing_source_does_not_abort_the_fan_out():
+    def flaky(query):
+        if query == "gust rejection":
+            raise RuntimeError("rate limited")
+        return fake_search(query)
+
+    plan = SearchPlan(question="q", queries=("gust rejection", "gust rejection survey"))
+    assert len(run_searches(plan, flaky)) == 2
+
+
+def test_records_without_any_identity_are_dropped():
+    plan = SearchPlan(question="q", queries=("x",))
+    assert run_searches(plan, lambda q: [{"title": "", "abstract": "orphan"}]) == []
+
+
+def test_to_paper_maps_the_source_dict_onto_the_domain_type():
+    p = to_paper(Candidate(paper=CORPUS["gust rejection"][0]))
+    assert p.paper_id == "2501.00001"
+    assert p.title == "Gust-Robust Control"
+    assert p.year == 2025
+    assert p.citation_count == 42
+    assert p.doi == "10.1/a"
+    assert p.retracted is False
+
+
+def test_to_paper_carries_the_retracted_flag_through():
+    c = Candidate(paper={"arxiv_id": "x1", "title": "T", "retracted": True})
+    assert to_paper(c).retracted is True
+
+
+def test_candidates_are_saved_at_metadata_depth(tmp_path):
+    conn = open_store(tmp_path / "c.db")
+    try:
+        cands = run_searches(SearchPlan(question="q", queries=("gust rejection survey",)),
+                             fake_search)
+        assert save_candidates(conn, cands) == 2
+        assert len(get_papers_by_depth(conn, "metadata")) == 2
+        assert get_paper(conn, "2501.00002").title == "A Survey of Wind Rejection"
+    finally:
+        close_store(conn)
+
+
+def test_saving_candidates_twice_does_not_duplicate_them(tmp_path):
+    conn = open_store(tmp_path / "c.db")
+    try:
+        cands = run_searches(SearchPlan(question="q", queries=("gust rejection survey",)),
+                             fake_search)
+        save_candidates(conn, cands)
+        save_candidates(conn, cands)
+        assert len(get_papers_by_depth(conn, "metadata")) == 2
+    finally:
+        close_store(conn)

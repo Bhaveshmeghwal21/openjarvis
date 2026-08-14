@@ -7,9 +7,15 @@ corpus (spec §4).
 """
 from __future__ import annotations
 
-from collections.abc import Callable
+import sqlite3
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
+
+from jarvis.citation_graph import paper_id
+from jarvis.models import Paper
+from jarvis.sources import dedup_papers
+from jarvis.store import save_paper
 
 _PLAN_PROMPT = (
     "Decompose this research question for a literature search.\n"
@@ -99,3 +105,74 @@ class LLMPlanner:
         if fallback.question not in queries:
             queries = (fallback.question,) + queries
         return SearchPlan(question=fallback.question, sub_questions=subs, queries=queries)
+
+
+
+@dataclass(frozen=True)
+class Candidate:
+    """A gathered paper plus how it was found. The gate reads `graph_depth` as a signal."""
+    paper: dict
+    origin: str = "search"          # search | citation
+    graph_depth: int = 0
+    queries: tuple[str, ...] = ()
+
+    @property
+    def pid(self) -> str:
+        return paper_id(self.paper)
+
+
+def run_searches(plan: SearchPlan,
+                 search_fn: Callable[[str], list[dict]]) -> list[Candidate]:
+    """Run every query in the plan, dedup across them, and record which queries hit.
+
+    A source that raises is skipped, never fatal: one API being rate-limited must not
+    cost the whole gather run its recall.
+    """
+    by_pid: dict[str, list[str]] = {}
+    papers: list[dict] = []
+    for query in plan.queries:
+        try:
+            found = search_fn(query) or []
+        except Exception:  # noqa: BLE001, S112 - a dead source costs less than no gather
+            continue
+        for paper in found:
+            pid = paper_id(paper)
+            if not pid:
+                continue
+            if pid in by_pid:
+                if query not in by_pid[pid]:
+                    by_pid[pid].append(query)
+                continue
+            by_pid[pid] = [query]
+            papers.append(paper)
+
+    return [Candidate(paper=p, origin="search", graph_depth=0,
+                      queries=tuple(by_pid[paper_id(p)]))
+            for p in dedup_papers(papers) if paper_id(p)]
+
+
+def to_paper(candidate: Candidate) -> Paper:
+    """Source dict -> the frozen domain type. Unknown fields become their defaults."""
+    p = candidate.paper
+    year = p.get("year")
+    return Paper(
+        paper_id=candidate.pid,
+        title=p.get("title", "") or "",
+        authors=tuple(p.get("authors") or ()),
+        year=int(year) if year else None,
+        venue=p.get("venue", "") or "",
+        doi=p.get("doi", "") or "",
+        arxiv_id=p.get("arxiv_id", "") or "",
+        s2_id=p.get("s2_id", "") or "",
+        abstract=p.get("abstract", "") or "",
+        citation_count=int(p.get("citation_count") or 0),
+        retracted=bool(p.get("retracted", False)),
+        source_path=p.get("pdf_url", "") or "",
+    )
+
+
+def save_candidates(conn: sqlite3.Connection, candidates: Sequence[Candidate]) -> int:
+    """Persist every candidate at `metadata` depth. Nothing is read yet; nothing is lost."""
+    for candidate in candidates:
+        save_paper(conn, to_paper(candidate), depth="metadata")
+    return len(candidates)
