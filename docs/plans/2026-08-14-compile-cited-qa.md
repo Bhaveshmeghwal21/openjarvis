@@ -1286,6 +1286,72 @@ git commit -m "feat: answer assembly with claim blocking and flagging"
 
 ---
 
+**Amended post-implementation** (Task 4 review, plan-conflict, human ruling: fix now,
+test-only, no production-code change):
+
+The reference `BLOCKS` fixture above has exactly one paragraph block, so `build_units`
+produces exactly one retrievable prose unit for the whole corpus. Two of the reference
+tests — `test_the_writer_only_ever_sees_capped_ordered_evidence` (`max_units=1`, asserts
+`len(seen["units"]) == 1`) and `test_the_evidence_cap_is_reported_not_hidden` (asserts
+`answer.dropped_evidence >= 0`) — were written to prove the evidence-cap wiring
+(`cap()`/`order_for_context()` genuinely applied before the writer sees anything), but with
+only one candidate unit ever available, both pass identically whether or not `ask()` calls
+`cap()`/`order_for_context()` at all. `jarvis/answer.py`'s own implementation is correct —
+this is purely a test-coverage gap in the reference fixture, the same category as the
+`FakeEmbedder` noise-floor fixture fix in the gather-and-gate branch's Task 8.
+
+Fix: expand `BLOCKS` to three distinct prose-producing paragraphs across three sections,
+so more than one unit is genuinely retrievable, and strengthen the two assertions to
+require an actual drop:
+
+```python
+BLOCKS = [
+    Block(kind="heading", text="Results", page=1, section_path=("Results",)),
+    Block(kind="paragraph", text="The controller reaches 94.2% tracking accuracy in gusts.",
+          page=1, section_path=("Results",)),
+    Block(kind="heading", text="Limitations", page=2, section_path=("Limitations",)),
+    Block(kind="paragraph", text="Performance degrades sharply above 12 m/s wind speed.",
+          page=2, section_path=("Limitations",)),
+    Block(kind="heading", text="Discussion", page=3, section_path=("Discussion",)),
+    Block(kind="paragraph", text="Future work should explore adaptive gain scheduling for "
+                                 "extreme wind conditions.", page=3, section_path=("Discussion",)),
+]
+```
+
+`_prose_unit`'s existing filter (`"94.2" in u.verbatim_text and u.type.value == "prose"`)
+still uniquely identifies the tracking-accuracy unit among the three — no other change
+needed there.
+
+```python
+def test_the_writer_only_ever_sees_capped_ordered_evidence(corpus):
+    seen = {}
+
+    class SpyWriter:
+        def write(self, question, units):
+            seen["units"] = list(units)
+            return Draft()
+
+    ask(corpus, QUESTION, FakeEmbedder(), SpyWriter(), ENTAILS, limit=8, max_units=1)
+    assert len(seen["units"]) == 1
+
+
+def test_the_evidence_cap_is_reported_not_hidden(corpus):
+    answer = ask(corpus, QUESTION, FakeEmbedder(), FakeWriter({}), ENTAILS,
+                 max_units=1, limit=8)
+    assert answer.dropped_evidence > 0, "with 3 candidate units and max_units=1, capping " \
+                                        "must genuinely drop at least one"
+```
+
+If, after running the suite, `search()` with `limit=8` does not surface all three units for
+`QUESTION` (e.g. because keyword matching alone doesn't hit the Discussion/Limitations
+paragraphs and vector-only recall via `FakeEmbedder` ranks one of them outside the
+practical top results), adjust `QUESTION` or the paragraph text so the fixture's own
+`corpus_search`/`retrieve_iteratively` call demonstrably returns at least 2 candidates
+before `cap()` — verify this against a real test run rather than assuming it; do not
+weaken the assertion back to `>= 0` to make it pass.
+
+---
+
 ### Task 5: ALCE-style citation precision and recall
 
 **Files:**
