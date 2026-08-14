@@ -18,6 +18,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
+from jarvis.evaluate import GATE_RECALL_TARGET
 from jarvis.gather import Candidate
 from jarvis.scoring import cosine, paper_text
 from jarvis.store import save_screen_decision, set_depth
@@ -221,3 +222,54 @@ def screen(conn: sqlite3.Connection, candidates: Sequence[Candidate], question: 
         set_depth(conn, candidate.pid, "pending_deep" if decision in KEPT else "metadata")
         out[candidate.pid] = decision
     return out
+
+
+def calibrate(signal_rows: Mapping[str, Signals], labels: Mapping[str, bool],
+              target_recall: float = GATE_RECALL_TARGET, floor: float = 0.0) -> Thresholds:
+    """Fit per-signal thresholds to a hand-labeled seed set (spec §7B, §10).
+
+    For each signal, sort the labeled-relevant papers' scores ascending and take the one
+    at index floor((1 - target) * n). At least `target_recall` of relevant papers clear
+    that bar on that signal alone; a union's recall is at least its best member's, so the
+    union clears the target too.
+
+    `floor` keeps a degenerate signal (one where even irrelevant papers score high) from
+    being tuned down to admitting the entire gather set.
+    """
+    relevant = [pid for pid, is_relevant in labels.items()
+                if is_relevant and pid in signal_rows]
+    if not relevant:
+        return Thresholds()
+
+    default = Thresholds()
+    fitted: dict[str, float] = {}
+    for name in default.as_dict():
+        scores = sorted(signal_rows[pid].as_dict()[name] for pid in relevant)
+        index = int((1.0 - target_recall) * len(scores))
+        index = max(0, min(index, len(scores) - 1))
+        fitted[name] = max(floor, scores[index])
+    return Thresholds(unsure_ratio=default.unsure_ratio, **fitted)
+
+
+def calibration_report(signal_rows: Mapping[str, Signals], labels: Mapping[str, bool],
+                       thresholds: Thresholds) -> dict:
+    """Re-run the decision over the seed set and report what the thresholds actually achieve.
+
+    Never trust a fitted threshold without this: the fit is per-signal, the gate is a
+    union, and the number that matters is the union's recall on real labels.
+    """
+    labeled = {pid: labels[pid] for pid in labels if pid in signal_rows}
+    decisions = {pid: decide(signal_rows[pid], thresholds) for pid in labeled}
+    kept = [pid for pid, d in decisions.items() if d in KEPT]
+    relevant = [pid for pid, is_relevant in labeled.items() if is_relevant]
+    relevant_kept = [pid for pid in kept if labeled[pid]]
+
+    return {
+        "recall": len(relevant_kept) / len(relevant) if relevant else 1.0,
+        "precision": len(relevant_kept) / len(kept) if kept else 0.0,
+        "kept": len(kept),
+        "relevant": len(relevant),
+        "relevant_kept": len(relevant_kept),
+        "labeled": len(labeled),
+        "thresholds": thresholds.as_dict(),
+    }

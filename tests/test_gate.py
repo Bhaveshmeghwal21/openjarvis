@@ -241,3 +241,85 @@ def test_gate_recall_reads_the_decisions_this_gate_produces(tmp_path):
         assert gate_recall(decisions, {"p1": True, "p2": False}) == 1.0
     finally:
         close_store(conn)
+
+
+from jarvis.evaluate import GATE_RECALL_TARGET
+from jarvis.gate import calibrate, calibration_report
+
+
+def _rows(n_relevant=20, n_irrelevant=80):
+    """Relevant papers score high on embedding; one outlier scores near zero on everything."""
+    rows = {}
+    for i in range(n_relevant):
+        score = 0.9 if i > 0 else 0.05      # paper r0 is the hard one every signal nearly misses
+        rows[f"r{i}"] = Signals(embedding=score, graph=0.0, keyword=score, llm_vote=0.0)
+    for i in range(n_irrelevant):
+        rows[f"n{i}"] = Signals(embedding=0.02, graph=0.0, keyword=0.02, llm_vote=0.0)
+    return rows
+
+
+def _labels(rows):
+    return {pid: pid.startswith("r") for pid in rows}
+
+
+def test_calibration_hits_the_recall_target():
+    rows = _rows()
+    thresholds = calibrate(rows, _labels(rows), target_recall=0.95)
+    achieved = calibration_report(rows, _labels(rows), thresholds)["recall"]
+    assert achieved >= 0.95
+
+
+def test_calibration_defaults_to_the_specs_target():
+    rows = _rows()
+    default = calibrate(rows, _labels(rows))
+    explicit = calibrate(rows, _labels(rows), target_recall=GATE_RECALL_TARGET)
+    assert default == explicit
+    assert GATE_RECALL_TARGET == 0.95
+
+
+def test_a_perfect_recall_target_lowers_thresholds_to_admit_the_outlier():
+    rows = _rows()
+    strict = calibrate(rows, _labels(rows), target_recall=1.0)
+    assert calibration_report(rows, _labels(rows), strict)["recall"] == 1.0
+    assert strict.embedding <= 0.05
+
+
+def test_a_looser_target_produces_higher_thresholds():
+    rows = _rows()
+    loose = calibrate(rows, _labels(rows), target_recall=0.90)
+    strict = calibrate(rows, _labels(rows), target_recall=1.0)
+    assert loose.embedding >= strict.embedding
+
+
+def test_calibration_reports_precision_and_the_kept_count():
+    rows = _rows()
+    rep = calibration_report(rows, _labels(rows), calibrate(rows, _labels(rows)))
+    assert 0.0 <= rep["precision"] <= 1.0
+    assert rep["kept"] >= rep["relevant_kept"]
+    assert rep["relevant"] == 20
+
+
+def test_calibration_with_no_labeled_relevant_papers_returns_the_defaults():
+    rows = _rows()
+    assert calibrate(rows, {pid: False for pid in rows}) == Thresholds()
+
+
+def test_calibration_with_no_rows_returns_the_defaults():
+    assert calibrate({}, {}) == Thresholds()
+
+
+def test_calibration_respects_a_floor_so_a_signal_never_admits_everything():
+    rows = _rows()
+    thresholds = calibrate(rows, _labels(rows), target_recall=1.0, floor=0.2)
+    assert thresholds.embedding >= 0.2
+
+
+def test_calibration_ignores_unlabelled_papers():
+    rows = _rows()
+    partial = {"r1": True, "n1": False}
+    assert calibrate(rows, partial).embedding == pytest.approx(0.9)
+
+
+def test_calibrated_thresholds_are_a_frozen_thresholds_instance():
+    rows = _rows()
+    assert isinstance(calibrate(rows, _labels(rows)), Thresholds)
