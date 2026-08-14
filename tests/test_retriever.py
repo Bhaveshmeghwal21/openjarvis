@@ -71,9 +71,10 @@ def test_refinement_surfaces_evidence_the_first_query_missed(corpus):
 
 def test_units_are_deduped_across_rounds(corpus):
     result = retrieve_iteratively(corpus, "tracking accuracy", FakeEmbedder(),
-                                  refiner=FakeRefiner(["tracking accuracy"] * 3), rounds=4)
+                                  refiner=FakeRefiner(["wind speed limitations"]), rounds=2)
     ids = [u.unit_id for u in result.units]
     assert len(ids) == len(set(ids))
+    assert result.rounds == 2, "both rounds must actually run for this test to mean anything"
 
 
 def test_a_refiner_returning_none_stops_the_loop_early(corpus):

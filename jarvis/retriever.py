@@ -21,7 +21,7 @@ from typing import Protocol, runtime_checkable
 
 from jarvis.embed import Embedder
 from jarvis.models import Unit
-from jarvis.retrieve import Reranker, search
+from jarvis.retrieve import Reranker, rrf, search
 
 _REFINE_PROMPT = (
     "You are retrieving evidence for a research question from a paper corpus.\n"
@@ -99,26 +99,37 @@ class LLMRefiner:
 def retrieve_iteratively(conn: sqlite3.Connection, question: str, embedder: Embedder, *,
                          refiner: Refiner | None = None, rounds: int = 3, limit: int = 8,
                          reranker: Reranker | None = None) -> Retrieval:
-    """Search, refine, search again. Stops on the budget, a repeat, or a `None` refinement."""
+    """Search, refine, search again. Stops on the budget, a repeat, or a `None` refinement.
+
+    Units are fused across rounds with the same Reciprocal Rank Fusion `search()` already
+    uses to fuse BM25 and vector rankings within one round: a unit ranked highly by two
+    different rounds is genuinely more likely relevant, and a later round's top hit is
+    never buried behind an earlier round's weaker one just because it arrived first.
+    """
     queries: list[str] = [question]
     seen_queries = {question}
-    units: list[Unit] = []
+    rankings: list[list[str]] = []
+    by_id: dict[str, Unit] = {}
+    accumulated: list[Unit] = []
     seen_units: set[str] = set()
     completed = 0
 
     while completed < max(1, rounds):
         query = queries[completed]
+        round_ids: list[str] = []
         for unit in search(conn, query, embedder, limit=limit, reranker=reranker):
-            if unit.unit_id in seen_units:
-                continue
-            seen_units.add(unit.unit_id)
-            units.append(unit)
+            round_ids.append(unit.unit_id)
+            by_id.setdefault(unit.unit_id, unit)
+            if unit.unit_id not in seen_units:
+                seen_units.add(unit.unit_id)
+                accumulated.append(unit)
+        rankings.append(round_ids)
         completed += 1
 
         if refiner is None or completed >= rounds:
             break
         try:
-            nxt = refiner.refine(question, tuple(queries), tuple(units))
+            nxt = refiner.refine(question, tuple(queries), tuple(accumulated))
         except Exception:  # noqa: BLE001 - keep everything retrieved so far
             break
         if not nxt or nxt in seen_queries:
@@ -126,5 +137,6 @@ def retrieve_iteratively(conn: sqlite3.Connection, question: str, embedder: Embe
         seen_queries.add(nxt)
         queries.append(nxt)
 
-    return Retrieval(question=question, units=tuple(units), queries=tuple(queries),
+    ordered = [by_id[uid] for uid, _ in rrf(rankings) if uid in by_id]
+    return Retrieval(question=question, units=tuple(ordered), queries=tuple(queries),
                      rounds=completed)
