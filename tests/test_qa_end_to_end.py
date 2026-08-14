@@ -125,7 +125,35 @@ def test_the_eval_report_scores_the_answer(corpus):
     assert r.citation_recall == pytest.approx(0.5)
 
 
-def test_the_evidence_reaching_the_writer_is_never_the_whole_corpus(corpus):
+def test_the_evidence_reaching_the_writer_is_never_the_whole_corpus(tmp_path):
+    """Its own 5-unit corpus, not the shared 3-unit fixture — the cap needs something to
+    actually cut, or this test cannot tell a working cap from a deleted one."""
+    blocks = [
+        Block(kind="heading", text="Results", page=1, section_path=("Results",)),
+        Block(kind="paragraph", text="The controller reaches 94.2% tracking accuracy.",
+              page=1, section_path=("Results",)),
+        Block(kind="heading", text="Limitations", page=2, section_path=("Limitations",)),
+        Block(kind="paragraph", text="Performance degrades above 12 m/s wind speed.",
+              page=2, section_path=("Limitations",)),
+        Block(kind="heading", text="Related Work", page=3, section_path=("Related Work",)),
+        Block(kind="paragraph", text="Prior controllers used fixed-gain PID schemes.",
+              page=3, section_path=("Related Work",)),
+        Block(kind="heading", text="Discussion", page=4, section_path=("Discussion",)),
+        Block(kind="paragraph", text="Future work should explore adaptive gain scheduling.",
+              page=4, section_path=("Discussion",)),
+        Block(kind="heading", text="Conclusion", page=5, section_path=("Conclusion",)),
+        Block(kind="paragraph", text="The approach generalizes to other wind regimes.",
+              page=5, section_path=("Conclusion",)),
+    ]
+    conn = open_store(tmp_path / "big_corpus.db")
+    paper = Paper(paper_id="p2", title="A Larger Paper", year=2025)
+    parsed = FakeParser(blocks).parse("big.pdf", "p2")
+    save_paper(conn, paper, raw_text=parsed.raw_text, depth="deep")
+    units = apply_prefixes(build_units(parsed), paper, TemplatePrefix())
+    save_units(conn, units)
+    index_units_fts(conn, units)
+    index_units(conn, units, FakeEmbedder())
+
     seen = {}
 
     class SpyWriter:
@@ -133,5 +161,10 @@ def test_the_evidence_reaching_the_writer_is_never_the_whole_corpus(corpus):
             seen["count"] = len(units)
             return Draft()
 
-    ask(corpus, QUESTION, FakeEmbedder(), SpyWriter(), ENTAILS, limit=20, max_units=3)
-    assert seen["count"] <= 3
+    answer = ask(conn, "how accurate is the controller under wind?", FakeEmbedder(),
+                 SpyWriter(), ENTAILS, limit=20, max_units=3)
+    close_store(conn)
+
+    assert seen["count"] == 3
+    assert answer.dropped_evidence > 0, "5 candidate units and max_units=3 must genuinely " \
+                                        "drop at least one"
