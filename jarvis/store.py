@@ -32,7 +32,7 @@ CREATE TABLE IF NOT EXISTS papers (
     version        TEXT NOT NULL DEFAULT '',
     source_path    TEXT NOT NULL DEFAULT '',
     raw_text       TEXT NOT NULL DEFAULT '',     -- Layer 0, immutable
-    depth          TEXT NOT NULL DEFAULT 'metadata'  -- metadata | abstract | deep
+    depth          TEXT NOT NULL DEFAULT 'metadata'  -- metadata | abstract | pending_deep | deep
 );
 
 CREATE TABLE IF NOT EXISTS units (

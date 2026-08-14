@@ -123,3 +123,121 @@ def test_llm_voter_routes_to_the_screen_vote_task():
 
     LLMVoter(_Router(), chat_fn=spy).vote(QUESTION, RELEVANT)
     assert seen["task"] == "screen_vote"
+
+
+
+from jarvis.evaluate import KEPT_DECISIONS, gate_recall
+from jarvis.gate import DECISIONS, KEPT, Thresholds, decide, screen
+from jarvis.gather import save_candidates
+from jarvis.store import (
+    close_store,
+    get_papers_by_depth,
+    get_screen_decisions,
+    get_screen_signals,
+    open_store,
+)
+
+
+def test_the_three_outcomes_are_exactly_the_spec_ones():
+    assert DECISIONS == ("read_deep", "unsure", "defer")
+    assert "exclude" not in DECISIONS
+
+
+def test_kept_matches_what_the_eval_harness_already_counts_as_kept():
+    assert set(KEPT) == KEPT_DECISIONS
+
+
+def test_any_single_signal_over_threshold_keeps_the_paper():
+    t = Thresholds()
+    assert decide(Signals(embedding=0.9), t) == "read_deep"
+    assert decide(Signals(graph=1.0), t) == "read_deep"
+    assert decide(Signals(keyword=0.9), t) == "read_deep"
+    assert decide(Signals(llm_vote=1.0), t) == "read_deep"
+
+
+def test_the_gate_is_a_union_not_an_intersection():
+    t = Thresholds()
+    only_one = Signals(embedding=0.0, graph=0.0, keyword=0.0, llm_vote=1.0)
+    assert decide(only_one, t) == "read_deep", "one signal is enough; intersection loses papers"
+
+
+def test_a_near_miss_is_unsure_not_deferred():
+    t = Thresholds(embedding=0.5, unsure_ratio=0.6)
+    assert decide(Signals(embedding=0.35), t) == "unsure"
+
+
+def test_nothing_anywhere_near_threshold_is_deferred():
+    assert decide(Signals(), Thresholds()) == "defer"
+
+
+def test_a_signal_exactly_at_threshold_is_kept():
+    assert decide(Signals(embedding=0.35), Thresholds(embedding=0.35)) == "read_deep"
+
+
+def test_screen_writes_every_decision_with_its_signals(tmp_path):
+    conn = open_store(tmp_path / "c.db")
+    try:
+        cands = [Candidate(paper=RELEVANT), Candidate(paper=IRRELEVANT, graph_depth=9)]
+        save_candidates(conn, cands)
+        decisions = screen(conn, cands, QUESTION, FakeEmbedder(),
+                           voter=FakeVoter({"p1": 1.0, "p2": 0.0}), run_id="r1")
+
+        assert decisions["p1"] == "read_deep"
+        assert get_screen_decisions(conn, "r1") == decisions
+        assert set(get_screen_signals(conn, "r1")["p1"]) == {
+            "embedding", "graph", "keyword", "llm_vote"}
+    finally:
+        close_store(conn)
+
+
+def test_a_deferred_paper_stays_in_the_corpus_at_metadata_depth(tmp_path):
+    conn = open_store(tmp_path / "c.db")
+    try:
+        cands = [Candidate(paper=IRRELEVANT)]
+        save_candidates(conn, cands)
+
+        class ZeroEmbedder:
+            """FakeEmbedder's hash-bucket noise floor (~0.2-0.3 cosine on any two short
+            texts) always clears the unsure band, so no signal-isolation test can use it
+            to assert `defer`. This returns orthogonal unit vectors keyed by text so the
+            question and an unrelated paper never overlap."""
+
+            def encode(self, texts):
+                return [[1.0, 0.0] if text == QUESTION else [0.0, 1.0] for text in texts]
+
+        decisions = screen(conn, cands, QUESTION, ZeroEmbedder(), voter=FakeVoter({}),
+                           run_id="r1")
+
+        assert decisions["p2"] == "defer"
+        assert [p.paper_id for p in get_papers_by_depth(conn, "metadata")] == ["p2"]
+        assert get_papers_by_depth(conn, "deep") == []
+    finally:
+        close_store(conn)
+
+
+def test_screening_is_rerunnable_without_refetching(tmp_path):
+    conn = open_store(tmp_path / "c.db")
+    try:
+        cands = [Candidate(paper=RELEVANT)]
+        save_candidates(conn, cands)
+        unreachable = Thresholds(embedding=1.1, graph=1.1, keyword=1.1, llm_vote=1.1)
+        screen(conn, cands, QUESTION, FakeEmbedder(), thresholds=unreachable,
+               run_id="strict")
+        screen(conn, cands, QUESTION, FakeEmbedder(), thresholds=Thresholds(), run_id="loose")
+
+        assert get_screen_decisions(conn, "strict")["p1"] != "read_deep"
+        assert get_screen_decisions(conn, "loose")["p1"] == "read_deep"
+    finally:
+        close_store(conn)
+
+
+def test_gate_recall_reads_the_decisions_this_gate_produces(tmp_path):
+    conn = open_store(tmp_path / "c.db")
+    try:
+        cands = [Candidate(paper=RELEVANT), Candidate(paper=IRRELEVANT, graph_depth=9)]
+        save_candidates(conn, cands)
+        decisions = screen(conn, cands, QUESTION, FakeEmbedder(),
+                           voter=FakeVoter({"p1": 1.0}), run_id="r1")
+        assert gate_recall(decisions, {"p1": True, "p2": False}) == 1.0
+    finally:
+        close_store(conn)

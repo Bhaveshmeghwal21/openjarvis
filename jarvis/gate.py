@@ -13,12 +13,14 @@ signals, calibrated per project against a hand-labeled seed, with three outcomes
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Mapping
+import sqlite3
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
 from jarvis.gather import Candidate
 from jarvis.scoring import cosine, paper_text
+from jarvis.store import save_screen_decision, set_depth
 
 _WORD = re.compile(r"[A-Za-z0-9]+")
 
@@ -156,3 +158,66 @@ def score_signals(candidate: Candidate, question: str, question_vector,
         keyword=keyword_overlap(question, candidate.paper),
         llm_vote=llm_vote,
     )
+
+
+
+DECISIONS = ("read_deep", "unsure", "defer")
+KEPT = ("read_deep", "unsure")   # matches jarvis.evaluate.KEPT_DECISIONS
+
+
+@dataclass(frozen=True)
+class Thresholds:
+    """Per-signal keep thresholds. Defaults are a starting point; calibrate per project.
+
+    `unsure_ratio` is the fraction of a threshold below which a signal still counts as a
+    near miss. Spec §7B: `unsure` escalates to deep read, so the band is deliberately wide.
+    """
+    embedding: float = 0.35
+    graph: float = 0.50
+    keyword: float = 0.30
+    llm_vote: float = 0.50
+    unsure_ratio: float = 0.60
+
+    def as_dict(self) -> dict[str, float]:
+        return {"embedding": self.embedding, "graph": self.graph,
+                "keyword": self.keyword, "llm_vote": self.llm_vote}
+
+
+def decide(signals: Signals, thresholds: Thresholds | None = None) -> str:
+    """Union rule. Any one signal clearing its bar keeps the paper.
+
+    Intersection would lose whatever any single signal misses, and §7B's whole point is
+    that every individual signal in this domain misses a lot.
+    """
+    t = thresholds or Thresholds()
+    scores = signals.as_dict()
+    bars = t.as_dict()
+
+    if any(scores[name] >= bars[name] for name in bars):
+        return "read_deep"
+    if any(scores[name] >= bars[name] * t.unsure_ratio for name in bars):
+        return "unsure"
+    return "defer"
+
+
+def screen(conn: sqlite3.Connection, candidates: Sequence[Candidate], question: str,
+           embedder, voter: Voter | None = None, thresholds: Thresholds | None = None,
+           run_id: str = "", max_depth: int = 2) -> dict[str, str]:
+    """Score and decide every candidate, logging per-signal scores for every one.
+
+    Papers are never removed: `read_deep` and `unsure` are promoted to `pending_deep`
+    depth for Stage C to pick up, `defer` is left at `metadata` depth and stays
+    recoverable when the question shifts.
+    """
+    t = thresholds or Thresholds()
+    question_vector = embedder.encode([question])[0]
+
+    out: dict[str, str] = {}
+    for candidate in candidates:
+        signals = score_signals(candidate, question, question_vector, embedder, voter,
+                                max_depth=max_depth)
+        decision = decide(signals, t)
+        save_screen_decision(conn, candidate.pid, decision, signals.as_dict(), run_id=run_id)
+        set_depth(conn, candidate.pid, "pending_deep" if decision in KEPT else "metadata")
+        out[candidate.pid] = decision
+    return out
