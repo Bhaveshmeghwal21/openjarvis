@@ -14,6 +14,7 @@ hybrid BM25+vector stack stays.
 """
 from __future__ import annotations
 
+import logging
 import sqlite3
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -22,6 +23,8 @@ from typing import Protocol, runtime_checkable
 from jarvis.embed import Embedder
 from jarvis.models import Unit
 from jarvis.retrieve import Reranker, rrf, search
+
+_LOGGER = logging.getLogger(__name__)
 
 _REFINE_PROMPT = (
     "You are retrieving evidence for a research question from a paper corpus.\n"
@@ -88,7 +91,9 @@ class LLMRefiner:
                                        found=found, question=question)
         try:
             raw = self._chat_fn()(self._router, "retrieval_refine", prompt, json_mode=True)
-        except Exception:  # noqa: BLE001 - a dead refiner ends the loop, never the answer
+        except Exception:  # a dead refiner ends the loop, never the answer
+            _LOGGER.warning("retrieval refiner model call failed; stopping refinement early",
+                            exc_info=True)
             return None
         if not isinstance(raw, dict):
             return None

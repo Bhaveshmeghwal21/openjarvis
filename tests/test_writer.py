@@ -114,3 +114,12 @@ def test_fake_writer_returns_the_draft_for_its_question():
 def test_draft_is_frozen():
     with pytest.raises(FrozenInstanceError):
         Draft(text="a", claims=()).text = "b"
+
+
+def test_llm_writer_logs_a_warning_on_failure(caplog):
+    def boom(*args, **kwargs):
+        raise RuntimeError("no key")
+
+    with caplog.at_level("WARNING"):
+        LLMWriter(_Router(), chat_fn=boom).write("q", UNITS)
+    assert any("failed" in r.message.lower() for r in caplog.records)

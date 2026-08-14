@@ -111,6 +111,9 @@ def test_every_claim_gets_exactly_one_verification(corpus):
 
 
 def test_the_writer_only_ever_sees_capped_ordered_evidence(corpus):
+    from jarvis.evidence import cap, order_for_context
+    from jarvis.retriever import retrieve_iteratively
+
     seen = {}
 
     class SpyWriter:
@@ -118,19 +121,31 @@ def test_the_writer_only_ever_sees_capped_ordered_evidence(corpus):
             seen["units"] = list(units)
             return Draft()
 
-    ask(corpus, QUESTION, FakeEmbedder(), SpyWriter(), ENTAILS, limit=8, max_units=1)
-    assert len(seen["units"]) == 1
+    ask(corpus, QUESTION, FakeEmbedder(), SpyWriter(), ENTAILS, limit=8, max_units=3)
+
+    retrieval = retrieve_iteratively(corpus, QUESTION, FakeEmbedder(), limit=8)
+    expected = order_for_context(cap(retrieval.units, max_units=3).units)
+    assert [u.unit_id for u in seen["units"]] == [u.unit_id for u in expected], \
+        "ask() must hand the writer order_for_context's interleave, not raw rank order"
 
 
-def test_a_question_with_no_retrievable_evidence_answers_nothing(corpus):
-    answer = ask(corpus, "zzzz nonexistent topic qqq", FakeEmbedder(), FakeWriter({}), ENTAILS)
-    assert answer.claims == ()
-    assert answer.is_grounded is False
+def test_a_question_with_no_retrievable_evidence_answers_nothing(tmp_path):
+    empty = open_store(tmp_path / "empty.db")
+    try:
+        answer = ask(empty, QUESTION, FakeEmbedder(), FakeWriter({}), ENTAILS)
+        assert answer.claims == ()
+        assert answer.is_grounded is False
+    finally:
+        close_store(empty)
 
 
-def test_an_empty_answer_renders_an_explicit_no_evidence_message(corpus):
-    answer = ask(corpus, "zzzz nonexistent topic qqq", FakeEmbedder(), FakeWriter({}), ENTAILS)
-    assert "no" in render_answer(answer).lower()
+def test_an_empty_answer_renders_an_explicit_no_evidence_message(tmp_path):
+    empty = open_store(tmp_path / "empty.db")
+    try:
+        answer = ask(empty, QUESTION, FakeEmbedder(), FakeWriter({}), ENTAILS)
+        assert "no" in render_answer(answer).lower()
+    finally:
+        close_store(empty)
 
 
 def test_the_evidence_cap_is_reported_not_hidden(corpus):
@@ -159,3 +174,28 @@ def test_verification_does_not_consult_the_writer(corpus):
 
     ask(corpus, QUESTION, FakeEmbedder(), CountingWriter(), ENTAILS)
     assert len(calls) == 1
+
+
+def test_two_claims_sharing_an_id_never_let_one_render_as_the_other(corpus):
+    unit = _prose_unit(corpus)
+    writer = FakeWriter({QUESTION: Draft(
+        text="x",
+        claims=(
+            Claim("dup", "It reaches 99.9% accuracy.", unit.unit_id,
+                  "reaches 99.9% tracking accuracy"),   # fabricated, will be blocked
+            Claim("dup", "It reaches 94.2% accuracy.", unit.unit_id,
+                  "reaches 94.2% tracking accuracy"),   # grounded, will be supported
+        ))})
+    answer = ask(corpus, QUESTION, FakeEmbedder(), writer, ENTAILS)
+    rendered = render_answer(answer)
+    assert "99.9" not in rendered, "the blocked claim's fabricated text must never render"
+    assert "94.2" in rendered
+
+
+def test_a_claim_citing_a_unit_outside_the_evidence_set_is_dropped_before_verification(corpus):
+    writer = FakeWriter({QUESTION: Draft(
+        text="x",
+        claims=(Claim("c-0", "invented", "not-a-real-unit-id", "some quote"),))})
+    answer = ask(corpus, QUESTION, FakeEmbedder(), writer, ENTAILS)
+    assert answer.claims == ()
+    assert answer.verifications == ()

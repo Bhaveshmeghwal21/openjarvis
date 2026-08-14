@@ -16,7 +16,8 @@ surfaces for a human instead of being silently passed or silently deleted.
 from __future__ import annotations
 
 import sqlite3
-from dataclasses import dataclass
+from collections.abc import Sequence
+from dataclasses import dataclass, replace
 
 from jarvis.embed import Embedder
 from jarvis.evidence import MAX_TOKENS, MAX_UNITS, cap, order_for_context
@@ -27,6 +28,42 @@ from jarvis.verify import NLIModel, verify_claim
 from jarvis.writer import Writer
 
 FLAGGED_VERDICTS = (Verdict.NEUTRAL, Verdict.CONTRADICTED)
+
+
+def _dedupe_claim_ids(claims: tuple[Claim, ...]) -> tuple[Claim, ...]:
+    """Guarantee unique claim_ids within one draft.
+
+    `Answer.claim_for` resolves by first-match id lookup; `verifications` is index-aligned
+    to `claims` by construction. `Writer` is an untrusted `typing.Protocol` boundary — a
+    well-behaved implementation (`claims_from_json`) already produces unique ids, but
+    nothing enforces it structurally. Without this, two claims sharing an id let a later
+    claim's verdict get attached to an earlier, unrelated claim's text via first-match
+    lookup — including rendering a BLOCKED claim's fabricated text as if it were the
+    SUPPORTED claim that happens to share its id.
+    """
+    seen: set[str] = set()
+    out: list[Claim] = []
+    for i, claim in enumerate(claims):
+        if claim.claim_id in seen:
+            out.append(replace(claim, claim_id=f"dedup-{i}"))
+        else:
+            seen.add(claim.claim_id)
+            out.append(claim)
+    return tuple(out)
+
+
+def _drop_citations_outside_evidence(claims: tuple[Claim, ...],
+                                     evidence: Sequence[Unit]) -> tuple[Claim, ...]:
+    """Drop any claim citing a unit_id outside the bounded evidence set it was shown.
+
+    `claims_from_json` already enforces this inside one `Writer` implementation, but
+    `Writer` is an untrusted Protocol boundary. A real quote from an out-of-budget unit
+    would ground and render as if it came from evidence `ask()` actually bounded and
+    ordered — the same class of gap `claims_from_json`'s own rejection rules exist to
+    close, just unenforced on the consuming side.
+    """
+    known = {u.unit_id for u in evidence}
+    return tuple(c for c in claims if c.unit_id in known)
 
 
 @dataclass(frozen=True)
@@ -75,10 +112,12 @@ def ask(conn: sqlite3.Connection, question: str, embedder: Embedder, writer: Wri
     evidence = order_for_context(budget.units)
 
     draft = writer.write(question, evidence)
+    claims = _dedupe_claim_ids(draft.claims)
+    claims = _drop_citations_outside_evidence(claims, evidence)
     verifications = tuple(verify_claim(conn, claim, nli, threshold=threshold)
-                          for claim in draft.claims)
+                          for claim in claims)
 
-    return Answer(question=question, text=draft.text, claims=draft.claims,
+    return Answer(question=question, text=draft.text, claims=claims,
                   verifications=verifications, units=tuple(evidence),
                   queries=retrieval.queries, dropped_evidence=budget.dropped)
 

@@ -142,3 +142,12 @@ def test_retrieval_is_frozen(corpus):
     result = retrieve_iteratively(corpus, "tracking accuracy", FakeEmbedder())
     with pytest.raises(dataclasses.FrozenInstanceError):
         result.question = "other"
+
+
+def test_llm_refiner_logs_a_warning_on_failure(caplog):
+    def boom(*args, **kwargs):
+        raise RuntimeError("down")
+
+    with caplog.at_level("WARNING"):
+        LLMRefiner(_Router(), chat_fn=boom).refine("q", ("q",), [])
+    assert any("failed" in r.message.lower() for r in caplog.records)

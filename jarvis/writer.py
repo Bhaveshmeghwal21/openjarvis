@@ -10,12 +10,15 @@ with separate inputs — the one multi-agent principle the literature is unambig
 """
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
 from jarvis.evidence import render
 from jarvis.models import Claim, Unit
+
+_LOGGER = logging.getLogger(__name__)
 
 _WRITE_PROMPT = (
     "Answer the question using ONLY the evidence below. Do not use prior knowledge.\n\n"
@@ -126,7 +129,9 @@ class LLMWriter:
                 prompt,
                 json_mode=True,
             )
-        except Exception:  # noqa: BLE001
+        except Exception:
+            _LOGGER.warning("writer model call failed; the corpus will read as having no "
+                            "evidence for this question", exc_info=True)
             return Draft()
         if not isinstance(raw, dict):
             return Draft()
