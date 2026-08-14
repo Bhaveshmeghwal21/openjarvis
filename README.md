@@ -34,15 +34,32 @@ benchmarks are single-shot and don't reward a corpus you keep.
 
 ## Status
 
-**The verifiable single-paper core (spec build steps 1–5) is complete.** Storage, parsing,
-typed evidence units, hybrid retrieval, and two-stage verification all exist, are tested end
-to end on a single paper, and passed a final whole-branch adversarial review. Gather + gate,
-compile, and long-form reports (spec build steps 6–10) are not yet built — each gets its own
-plan once this core measures correctly, per the spec's own build order.
+**The verifiable single-paper core (spec build steps 1–5) is complete and merged to `main`.**
+Storage, parsing, typed evidence units, hybrid retrieval, and two-stage verification all
+exist, are tested end to end on a single paper, and passed a final whole-branch adversarial
+review.
+
+**Gather + gate (spec build step 6) is also complete**, on this branch: multi-source search
+(arXiv, Semantic Scholar, OpenAlex, Crossref, CORE, Unpaywall) with citation-graph expansion,
+retraction checking, a calibrated union gate with no `exclude` outcome, Stage C deep-read
+into the corpus, and Layer 2 card extraction with mechanically verified quote bindings. Also
+passed a final whole-branch adversarial review — this one required two rounds of fix and
+independent re-review, since the first fix attempt for a calibration-floor bug introduced its
+own regression that a second review caught before it shipped. See `LEDGER-gather-and-gate.md`
+for the full history.
+
+Compile (Q&A), MCP server, contradiction detection, and long-form reports (spec build steps
+7–10) each have a complete implementation plan written (`docs/plans/2026-08-14-*.md`) but are
+not yet built.
 
 Read the spec first: [`docs/specs/2026-08-11-research-corpus-agent-design.md`](docs/specs/2026-08-11-research-corpus-agent-design.md).
-Every non-obvious decision in it carries the measurement that drove it. The implementation
-plan is at [`docs/plans/2026-08-11-verifiable-single-paper-core.md`](docs/plans/2026-08-11-verifiable-single-paper-core.md).
+Every non-obvious decision in it carries the measurement that drove it. Implementation plans:
+[steps 1–5](docs/plans/2026-08-11-verifiable-single-paper-core.md) ·
+[step 6 — gather + gate](docs/plans/2026-08-14-gather-and-gate.md) ·
+[step 7 — compile/Q&A](docs/plans/2026-08-14-compile-cited-qa.md) ·
+[step 8 — MCP server](docs/plans/2026-08-14-mcp-server.md) ·
+[step 9 — contradiction detection](docs/plans/2026-08-14-contradiction-detection.md) ·
+[step 10 — long-form reports](docs/plans/2026-08-14-longform-reports.md).
 
 | Module | Purpose |
 |---|---|
@@ -57,16 +74,22 @@ plan is at [`docs/plans/2026-08-11-verifiable-single-paper-core.md`](docs/plans/
 | `jarvis/retrieve.py` | Hybrid retrieval: RRF fusion, reranking, parent-unit expansion |
 | `jarvis/verify.py` | Two-stage verification: deterministic quote grounding + NLI entailment |
 | `jarvis/evaluate.py` | Evaluation metrics: quote fidelity, statement support, gate recall, coverage |
-| `jarvis/sources.py` | Multi-source search (Crossref, CORE, Unpaywall) + dedup |
+| `jarvis/gather.py` | Stage A: search plan, multi-source fan-out, citation-graph expansion |
+| `jarvis/gate.py` | Stage B: four independent signals, union decision, threshold calibration |
+| `jarvis/label.py` | Seed-set sampling and hand-label round-trip for gate calibration |
+| `jarvis/ingest.py` | Stage C: deep read into the corpus with per-paper failure isolation |
+| `jarvis/card.py` | Layer 2 card extraction with mechanically verified quote bindings |
+| `jarvis/sources.py` | Multi-source search (arXiv, S2, OpenAlex, Crossref, CORE, Unpaywall) + dedup + retraction check |
 | `jarvis/citation_graph.py` | Citation-graph traversal for recall |
 | `jarvis/scoring.py` | Cosine, recency, citation weighting |
 | `jarvis/router.py` | Task→tier model routing + measured cost logging |
 | `jarvis/config.py` | Env/JSON config; never reads `.env` |
 | `jarvis/llm.py` | Lazy OpenAI-compatible chat helper |
 
-The last six rows are gather-stage primitives ported from the NanoResearch jarvis package
-(no runtime dependency in either direction — see spec §12). Everything above them is new to
-this repo.
+`citation_graph.py`, `scoring.py`, `router.py`, `config.py`, and `llm.py` are gather-stage
+primitives ported from the NanoResearch jarvis package (no runtime dependency in either
+direction — see spec §12). `sources.py` was ported and then substantially extended on this
+branch with new source adapters and the retraction check. Everything else is new.
 
 ## Install
 
