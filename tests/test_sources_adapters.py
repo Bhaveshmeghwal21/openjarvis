@@ -106,3 +106,57 @@ def test_normalized_records_dedup_against_each_other():
     merged = dedup_papers([normalize_s2(S2_ITEM), normalize_arxiv_entry(ARXIV_ENTRY),
                            normalize_openalex(OPENALEX_ITEM)])
     assert len(merged) == 1, "the same paper from three APIs is one paper"
+
+
+
+from jarvis.sources import enrich_provenance, is_retracted_record
+
+
+def test_a_retraction_notice_is_detected_by_type():
+    assert is_retracted_record({"type": "retraction"}) is True
+
+
+def test_a_work_with_a_retraction_update_is_detected():
+    assert is_retracted_record({"update-to": [{"type": "retraction",
+                                               "DOI": "10.1/original"}]}) is True
+
+
+def test_a_work_flagged_by_subtype_is_detected():
+    assert is_retracted_record({"subtype": "retracted-article"}) is True
+
+
+def test_an_ordinary_article_is_not_retracted():
+    assert is_retracted_record({"type": "journal-article",
+                                "update-to": [{"type": "correction"}]}) is False
+    assert is_retracted_record({}) is False
+    assert is_retracted_record(None) is False
+
+
+def test_enrich_marks_a_retracted_paper_and_leaves_the_rest_alone():
+    paper = {"doi": "10.1/bad", "title": "T", "year": 2025}
+    out = enrich_provenance(paper, retraction_check=lambda doi: doi == "10.1/bad")
+    assert out["retracted"] is True
+    assert out["title"] == "T"
+    assert paper.get("retracted") is None, "enrich must not mutate its input"
+
+
+def test_enrich_defaults_to_not_retracted_without_a_checker():
+    assert enrich_provenance({"doi": "10.1/x"})["retracted"] is False
+
+
+def test_enrich_skips_the_lookup_when_there_is_no_doi():
+    calls = []
+
+    def check(doi):
+        calls.append(doi)
+        return True
+
+    assert enrich_provenance({"doi": ""}, retraction_check=check)["retracted"] is False
+    assert calls == []
+
+
+def test_enrich_treats_a_failing_lookup_as_unknown_not_retracted():
+    def boom(doi):
+        raise RuntimeError("crossref down")
+
+    assert enrich_provenance({"doi": "10.1/x"}, retraction_check=boom)["retracted"] is False

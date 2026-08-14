@@ -308,3 +308,55 @@ def make_arxiv_search(limit: int = 20) -> Callable[[str], list[dict]]:
         return out
 
     return search
+
+
+_RETRACTION_MARKERS = ("retraction", "retracted")
+
+
+def is_retracted_record(work: dict | None) -> bool:
+    """True when a Crossref work is a retraction notice or is flagged as retracted."""
+    if not work:
+        return False
+    for key in ("type", "subtype"):
+        if any(m in str(work.get(key, "")).lower() for m in _RETRACTION_MARKERS):
+            return True
+    return any("retraction" in str(u.get("type", "")).lower()
+               for u in (work.get("update-to") or []))
+
+
+def make_retraction_check() -> Callable[[str], bool]:
+    """Live Crossref retraction lookup by DOI. Spec §14: the cheapest failure to prevent."""
+    import httpx
+
+    def check(doi: str) -> bool:
+        if not doi:
+            return False
+        try:
+            with httpx.Client(timeout=30) as client:
+                resp = client.get(f"https://api.crossref.org/works/{doi}")
+                resp.raise_for_status()
+                work = resp.json().get("message", {})
+        except (httpx.HTTPError, ValueError):
+            return False
+        return is_retracted_record(work)
+
+    return check
+
+
+def enrich_provenance(paper: dict,
+                      retraction_check: Callable[[str], bool] | None = None) -> dict:
+    """Return a copy of `paper` with a `retracted` flag resolved.
+
+    A failed or absent lookup means *unknown*, which is recorded as not-retracted rather
+    than blocking ingest — a paper is never dropped by this system, only flagged.
+    """
+    out = dict(paper)
+    doi = (out.get("doi") or "").strip()
+    retracted = False
+    if doi and retraction_check is not None:
+        try:
+            retracted = bool(retraction_check(doi))
+        except Exception:  # noqa: BLE001 - a source outage is not a retraction
+            retracted = False
+    out["retracted"] = retracted
+    return out
