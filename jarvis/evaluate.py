@@ -34,6 +34,33 @@ def statement_support(verifications: Sequence[Verification]) -> float:
     return sum(1 for v in verifications if v.verdict is Verdict.SUPPORTED) / len(verifications)
 
 
+def citation_precision(verifications: Sequence[Verification]) -> float:
+    """ALCE-style: fraction of (claim, citation) pairs whose citation supports the claim.
+
+    Answers "when this system cites something, is the citation doing its job?" Tracked,
+    no target in v1 (spec §10).
+    """
+    if not verifications:
+        return 0.0
+    supported = sum(1 for v in verifications if v.verdict is Verdict.SUPPORTED)
+    return supported / len(verifications)
+
+
+def citation_recall(verifications: Sequence[Verification]) -> float:
+    """ALCE-style: fraction of distinct claims with at least one supporting citation.
+
+    Diverges from precision whenever a claim carries several citations: a claim cited five
+    times where one supports it has recall 1.0 and precision 0.2. Both numbers are needed.
+    """
+    by_claim: dict[str, bool] = {}
+    for v in verifications:
+        by_claim[v.claim_id] = by_claim.get(v.claim_id, False) or \
+            (v.verdict is Verdict.SUPPORTED)
+    if not by_claim:
+        return 0.0
+    return sum(1 for ok in by_claim.values() if ok) / len(by_claim)
+
+
 def gate_recall(decisions: Mapping[str, str], labels: Mapping[str, bool]) -> float:
     """Fraction of hand-labelled relevant papers the gate kept. Target >= 0.95.
 
@@ -60,6 +87,8 @@ class EvalReport:
     statement_support: float
     gate_recall: float | None = None
     coverage: float | None = None
+    citation_precision: float | None = None
+    citation_recall: float | None = None
 
     @property
     def meets_quote_target(self) -> bool:
@@ -89,4 +118,6 @@ def report(verifications: Sequence[Verification],
                      if decisions is not None and labels is not None else None),
         coverage=(coverage(cited, corpus)
                   if cited is not None and corpus is not None else None),
+        citation_precision=citation_precision(verifications),
+        citation_recall=citation_recall(verifications),
     )
