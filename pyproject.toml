@@ -15,7 +15,7 @@ dependencies = [
 # Layered so the core stays importable offline and CI needs nothing heavy.
 llm = ["openai>=1.40"]
 parse = ["docling>=2.0"]
-index = ["sqlite-vec>=0.1", "sentence-transformers>=3.0"]
+index = ["numpy>=1.24", "sentence-transformers>=3.0"]
 verify = ["transformers>=4.44", "torch>=2.4"]
 dev = ["pytest>=8.0", "ruff>=0.6"]
 

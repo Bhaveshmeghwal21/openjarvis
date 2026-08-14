@@ -34,15 +34,29 @@ benchmarks are single-shot and don't reward a corpus you keep.
 
 ## Status
 
-**Design complete, implementation at step 0 of 10.**
+**The verifiable single-paper core (spec build steps 1–5) is complete.** Storage, parsing,
+typed evidence units, hybrid retrieval, and two-stage verification all exist, are tested end
+to end on a single paper, and passed a final whole-branch adversarial review. Gather + gate,
+compile, and long-form reports (spec build steps 6–10) are not yet built — each gets its own
+plan once this core measures correctly, per the spec's own build order.
 
 Read the spec first: [`docs/specs/2026-08-11-research-corpus-agent-design.md`](docs/specs/2026-08-11-research-corpus-agent-design.md).
-Every non-obvious decision in it carries the measurement that drove it.
-
-What exists so far — gather-stage primitives ported from the NanoResearch jarvis package:
+Every non-obvious decision in it carries the measurement that drove it. The implementation
+plan is at [`docs/plans/2026-08-11-verifiable-single-paper-core.md`](docs/plans/2026-08-11-verifiable-single-paper-core.md).
 
 | Module | Purpose |
 |---|---|
+| `jarvis/models.py` | Frozen domain types for Layers 0/1/2 and verification |
+| `jarvis/text.py` | Text normalization and verbatim span-finding for quote verification |
+| `jarvis/store.py` | SQLite persistence — the only module that writes SQL |
+| `jarvis/parse.py` | Parser protocol, fake double, lazy Docling adapter |
+| `jarvis/units.py` | Layer 0 → Layer 1: typed evidence units, binding rules, parent/child structure |
+| `jarvis/context.py` | Contextual prefixes for child units (Anthropic Contextual Retrieval) |
+| `jarvis/embed.py` | Embedder protocol, fake/BGE adapters, brute-force vector search |
+| `jarvis/index.py` | FTS5 keyword index — the BM25 half of hybrid retrieval |
+| `jarvis/retrieve.py` | Hybrid retrieval: RRF fusion, reranking, parent-unit expansion |
+| `jarvis/verify.py` | Two-stage verification: deterministic quote grounding + NLI entailment |
+| `jarvis/evaluate.py` | Evaluation metrics: quote fidelity, statement support, gate recall, coverage |
 | `jarvis/sources.py` | Multi-source search (Crossref, CORE, Unpaywall) + dedup |
 | `jarvis/citation_graph.py` | Citation-graph traversal for recall |
 | `jarvis/scoring.py` | Cosine, recency, citation weighting |
@@ -50,8 +64,9 @@ What exists so far — gather-stage primitives ported from the NanoResearch jarv
 | `jarvis/config.py` | Env/JSON config; never reads `.env` |
 | `jarvis/llm.py` | Lazy OpenAI-compatible chat helper |
 
-Not built yet: the corpus store, parsing, typed evidence units, retrieval, and verification —
-build steps 1–5 in the spec. **Nothing is trustworthy until step 5 (the eval harness) exists.**
+The last six rows are gather-stage primitives ported from the NanoResearch jarvis package
+(no runtime dependency in either direction — see spec §12). Everything above them is new to
+this repo.
 
 ## Install
 

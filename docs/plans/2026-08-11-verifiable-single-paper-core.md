@@ -323,6 +323,16 @@ def test_find_span_is_case_and_punctuation_sensitive_enough_to_matter():
     assert find_span("94.2% on KITTI", "we report 91.7% on KITTI") is None
 
 
+def test_find_span_rejects_a_partial_number_match_inside_a_longer_one():
+    # "2.5% error" is a literal tail-substring of "12.5% error" but is a different,
+    # fabricated number. An unanchored substring search would wrongly accept this.
+    assert find_span("2.5% error", "we measure 12.5% error on the test set") is None
+
+
+def test_find_span_rejects_a_partial_word_match():
+    assert find_span("cat", "the results concatenate nicely") is None
+
+
 def test_find_span_of_empty_needle_is_none():
     assert find_span("", "anything") is None
 
@@ -391,15 +401,25 @@ def find_span(needle: str, haystack: str) -> tuple[int, int] | None:
 
     Returns (start, end) offsets into `normalize(haystack)`, or None when absent.
     Matching stays exact after normalization: a changed number or word is not a match.
+
+    Boundary-anchored: a plain substring search would let "2.5% error" match inside
+    "12.5% error" — a materially different, fabricated number reported as present. A
+    genuine verbatim quote always starts and ends on a token boundary in the source
+    text, so a match is only accepted when the character immediately before and after
+    it (if any) is not alphanumeric.
     """
     n = normalize(needle)
     if not n:
         return None
     h = normalize(haystack)
     idx = h.find(n)
-    if idx < 0:
-        return None
-    return (idx, idx + len(n))
+    while idx >= 0:
+        before_ok = idx == 0 or not h[idx - 1].isalnum()
+        after_ok = (idx + len(n) == len(h)) or not h[idx + len(n)].isalnum()
+        if before_ok and after_ok:
+            return (idx, idx + len(n))
+        idx = h.find(n, idx + 1)
+    return None
 
 
 def approx_tokens(text: str) -> int:
@@ -747,6 +767,20 @@ def test_parent_id_survives_roundtrip(conn):
     save_units(conn, [_unit("parent"), _unit("child", ordinal=1, parent="parent")])
     child = get_unit(conn, "child")
     assert child.parent_id == "parent"
+
+
+def test_resaving_a_unit_refreshes_its_section_path(conn):
+    # unit_id embeds paper_id/type/page/ordinal, so those can't silently go stale on a
+    # same-id re-save — but section_path is not part of the id and must be refreshed
+    # explicitly, or a re-chunk with different section boundaries leaves a stale path.
+    import dataclasses
+
+    save_paper(conn, Paper("p1", "T"))
+    original = _unit()
+    save_units(conn, [original])
+    moved = dataclasses.replace(original, section_path=("Results", "Ablations"))
+    save_units(conn, [moved])
+    assert get_unit(conn, original.unit_id).section_path == ("Results", "Ablations")
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -813,12 +847,17 @@ def get_raw_text(conn: sqlite3.Connection, paper_id: str) -> str:
 
 
 def save_units(conn: sqlite3.Connection, units: list[Unit]) -> None:
+    """Upsert units. `unit_id` embeds paper_id/type/page/ordinal (see `Unit.key()`), so
+    those can never silently go stale on a same-id re-save; section_path is not part of
+    the id and must be refreshed explicitly, or a re-chunk with different section
+    boundaries would leave the old path in storage."""
     conn.executemany(
         """
         INSERT INTO units (unit_id, paper_id, type, page, section_path, verbatim_text,
                            ordinal, context_prefix, parent_id, label)
         VALUES (?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(unit_id) DO UPDATE SET
+            section_path=excluded.section_path,
             verbatim_text=excluded.verbatim_text,
             context_prefix=excluded.context_prefix,
             parent_id=excluded.parent_id, label=excluded.label
@@ -1305,6 +1344,35 @@ def test_ordinals_continue_from_start_ordinal():
 def test_captions_are_not_emitted_as_standalone_units():
     units = build_artifact_units(_parsed([TABLE, CAPTION]))
     assert len(units) == 1
+
+
+def test_find_references_matches_the_eq_abbreviation():
+    # "Eq." doesn't share a 3-letter prefix with "Equation" the way "Tab."/"Fig." do
+    # with their full words, so it needs an explicit override.
+    blocks = [Block(kind="paragraph", text="Eq. 5 gives the result.")]
+    assert find_references(blocks, "Equation 5") == ["Eq. 5 gives the result."]
+
+
+def test_find_references_rejects_a_decimal_numbered_label():
+    # "Table 3" must not match "Table 3.1" / "Table 3.2" / "Table 3.10" — those are
+    # different, more specific tables, and folding their prose into Table 3's unit
+    # would fabricate an association the paper never made.
+    blocks = [
+        Block(kind="paragraph", text="Table 3.1 shows the breakdown by class."),
+        Block(kind="paragraph", text="Table 3.2 provides more detail."),
+        Block(kind="paragraph", text="See Table 3.10 for the ablation."),
+        Block(kind="paragraph", text="Table 3 confirms this."),
+    ]
+    found = find_references(blocks, "Table 3")
+    assert found == ["Table 3 confirms this."]
+
+
+def test_labeled_artifact_with_no_text_caption_or_references_still_becomes_a_unit():
+    figure = Block(kind="figure", text="", page=4, label="Figure 7")
+    units = build_artifact_units(_parsed([figure]))
+    assert len(units) == 1
+    assert units[0].label == "Figure 7"
+    assert units[0].verbatim_text  # never empty — falls back to the label
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -1326,28 +1394,92 @@ ARTIFACT_KINDS = {"table": UnitType.TABLE, "figure": UnitType.FIGURE,
                   "equation": UnitType.EQUATION}
 
 
+# The word[:3] stem heuristic works only when an abbreviation shares a 3+ letter prefix
+# with the full word ("Table"/"Tab.", "Figure"/"Fig." both do). "Eq." does not share a
+# 3-letter prefix with "Equation", so it needs an explicit override — without one,
+# find_references(blocks, "Equation 5") would never match "Eq. 5 gives the result",
+# silently dropping referencing prose for equations specifically.
+_ABBREVIATIONS = {"equation": "eq"}
+
+
 def _label_pattern(label: str) -> re.Pattern[str] | None:
-    """Match 'Table 3' / 'Tab. 3' / 'Fig 3' but never 'Table 30'."""
+    """Match 'Table 3' / 'Tab. 3' / 'Fig 3' / 'Eq. 5' but never 'Table 30' or 'Table 3.1'.
+
+    The trailing lookahead rejects both a directly-following digit ("30") and a
+    decimal continuation (".1", ".10") — without the latter, "Table 3" would wrongly
+    match inside "Table 3.1 shows...", folding prose about a different, more specific
+    table into Table 3's evidence unit.
+    """
     m = re.match(r"([A-Za-z]+)\.?\s*(\d+)", label.strip())
     if not m:
         return None
     word, number = m.group(1), m.group(2)
-    stem = re.escape(word[:3])
-    return re.compile(rf"\b{stem}[a-z]*\.?\s*{re.escape(number)}\b(?!\d)", re.IGNORECASE)
+    stem = re.escape(_ABBREVIATIONS.get(word.lower(), word[:3]))
+    return re.compile(rf"\b{stem}[a-z]*\.?\s*{re.escape(number)}\b(?!\.?\d)", re.IGNORECASE)
 
 
-def find_references(blocks: Sequence[Block], label: str) -> list[str]:
-    """Prose blocks that mention `label`. This is what keeps 'as shown in Figure 3' bound."""
+> **Amended post-implementation (final whole-branch review, category-1 plan-conflict, "fix
+> now" ruling).** The reference code below originally bound captions and references by a
+> **document-wide exact-label scan**: `[b.text for b in blocks if b.kind == "caption" and
+> b.label == block.label]`. If a parser ever emits the same label string for two distinct
+> artifacts (an appendix restarting "Table 3" numbering, an OCR/layout glitch), that scan
+> matches both captions for both artifacts — each absorbs the other's caption, and a claim
+> citing the wrong table's unit could still pass the deterministic quote-grounding check,
+> because the misattributed text really is stored verbatim, just in the wrong unit. This
+> defeats spec §5's binding rule ("a table without its headers is misleading... units are
+> never split across these boundaries") under a realistic upstream-parser precondition, even
+> though no single string match is itself dishonest. Fixed by scoping both caption and
+> reference binding to the **nearest** same-labeled artifact (by block-index distance, ties
+> favoring the earlier artifact) rather than every match in the document — a strict no-op
+> whenever a label is unique, which is the common case and the only one the tests below
+> exercise directly (see `tests/test_units_artifacts.py`'s duplicate-label tests, added in
+> the fix wave, for the multi-artifact case). `find_references` gained optional
+> `owner`/`candidates` keyword parameters for this; omitted, it keeps its original
+> document-wide behavior so existing single-artifact call sites are unaffected.
+
+```python
+def _nearest_of(position: int, candidates: Sequence[int]) -> int | None:
+    """Which of `candidates` (block indices) is closest to `position`. Ties favor the earlier
+    candidate, so a caption/reference sitting exactly between two same-labeled artifacts is
+    deterministically attributed rather than binding to whichever the loop iterated to last.
+    """
+    if not candidates:
+        return None
+    return min(candidates, key=lambda c: (abs(c - position), c))
+
+
+def find_references(blocks: Sequence[Block], label: str, *, owner: int | None = None,
+                    candidates: Sequence[int] | None = None) -> list[str]:
+    """Prose blocks that mention `label`. This is what keeps 'as shown in Figure 3' bound.
+
+    When `owner` and `candidates` are given, a match is only returned when `owner` (a block
+    index) is the nearest of `candidates` (block indices sharing `label`) to the matching
+    prose block — this disambiguates which of several same-labeled artifacts a reference
+    belongs to. Omitted (the default), every match in the document is returned, which is
+    correct whenever `label` is unique — the common case, and the only one the original
+    single-artifact call sites need.
+    """
     pattern = _label_pattern(label)
     if pattern is None:
         return []
-    return [b.text for b in blocks
-            if b.kind in PROSE_KINDS and pattern.search(b.text)]
+    found: list[str] = []
+    for i, b in enumerate(blocks):
+        if b.kind not in PROSE_KINDS or not pattern.search(b.text):
+            continue
+        if owner is not None and candidates and _nearest_of(i, candidates) != owner:
+            continue
+        found.append(b.text)
+    return found
 
 
 def build_artifact_units(parsed: ParsedPaper, start_ordinal: int = 0) -> list[Unit]:
-    """One unit per table/figure/equation: artifact + caption + referring prose, indivisible."""
+    """One unit per table/figure/equation: artifact + caption + referring prose, indivisible.
+
+    Caption/reference binding is scoped to the *nearest* same-labeled artifact, not a
+    document-wide exact-label scan — see the amendment note above.
+    """
     blocks = list(parsed.blocks)
+    artifact_positions = [i for i, b in enumerate(blocks) if b.kind in ARTIFACT_KINDS]
     units: list[Unit] = []
     ordinal = start_ordinal
 
@@ -1361,9 +1493,11 @@ def build_artifact_units(parsed: ParsedPaper, start_ordinal: int = 0) -> list[Un
             parts.append(block.text)
 
         if block.label:
-            parts += [b.text for b in blocks
-                      if b.kind == "caption" and b.label == block.label]
-            parts += find_references(blocks, block.label)
+            same_label = [j for j in artifact_positions if blocks[j].label == block.label]
+            parts += [b.text for j, b in enumerate(blocks)
+                      if b.kind == "caption" and b.label == block.label
+                      and _nearest_of(j, same_label) == i]
+            parts += find_references(blocks, block.label, owner=i, candidates=same_label)
         else:
             # Unlabelled artifact (common for equations): take the preceding prose block.
             for previous in reversed(blocks[:i]):
@@ -1372,7 +1506,12 @@ def build_artifact_units(parsed: ParsedPaper, start_ordinal: int = 0) -> list[Un
                     break
 
         if not parts:
-            continue
+            # A labeled-but-textless artifact (e.g. a figure with no matched caption and
+            # no referencing prose) must still become a unit, never vanish silently —
+            # fall back to its label, or a minimal placeholder if it has none.
+            parts = [block.label] if block.label else [
+                f"({unit_type.value} on page {block.page}, no extractable text or caption)"
+            ]
 
         unit = Unit(unit_id="", paper_id=parsed.paper_id, type=unit_type, page=block.page,
                     section_path=block.section_path,
@@ -1386,7 +1525,8 @@ def build_artifact_units(parsed: ParsedPaper, start_ordinal: int = 0) -> list[Un
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `python -m pytest tests/test_units_artifacts.py -v && ruff check jarvis/units.py`
-Expected: 9 passed, ruff clean
+Expected: 9 passed, ruff clean (16 passed after the post-review fix wave adds duplicate-label
+and no-op-scoping regression tests)
 
 - [ ] **Step 5: Commit**
 
@@ -2659,6 +2799,20 @@ def quote_is_grounded(conn: sqlite3.Connection, claim: Claim) -> bool:
     return find_span(claim.quote, get_raw_text(conn, unit.paper_id)) is not None
 
 
+> **Amended post-implementation (final whole-branch review, category-1 plan-conflict, "fix
+> now" ruling).** The reference code below originally resolved an **exact or near-tie**
+> between `entail` and `contra` — both at or above `threshold`, a genuinely ambiguous NLI
+> read — to `SUPPORTED`, because the contradiction branch required *strict* `contra > entail`
+> and fell through to the plain `entail >= threshold` check on a tie. Spec §5/§8 frame NLI
+> as "a filter, not an oracle" whose "low-confidence results surface as flagged rather than
+> silently passed" — a tied read is exactly a low-confidence result, and defaulting it to
+> SUPPORTED contradicts that stance even though it does not let a *fabricated quote* through
+> (stage 1's grounding gate is unaffected). Fixed by checking `contra >= threshold and entail
+> >= threshold` first and routing that case to `NEUTRAL`, ahead of the contradiction and
+> support branches; an ordinary, non-tied case (either score below threshold, or a real gap
+> between them) resolves exactly as before.
+
+```python
 def verify_claim(conn: sqlite3.Connection, claim: Claim, nli: NLIModel,
                  threshold: float = 0.5) -> Verification:
     """Run both stages. Stage 2 is never reached when stage 1 fails."""
@@ -2670,7 +2824,14 @@ def verify_claim(conn: sqlite3.Connection, claim: Claim, nli: NLIModel,
     entail = float(scores.get("entailment", 0.0))
     contra = float(scores.get("contradiction", 0.0))
 
-    if contra >= threshold and contra > entail:
+    # NLI is a filter, not an oracle (spec §5, §8): when the model is confidently asserting
+    # both entailment and contradiction at once (a tie or near-tie above threshold), that is
+    # an unreliable/ambiguous read, not evidence favoring one side. Defaulting a tie to
+    # SUPPORTED would let a claim the model is equally confident contradicts pass as
+    # verified; routing it to NEUTRAL keeps verification conservative instead.
+    if contra >= threshold and entail >= threshold:
+        verdict = Verdict.NEUTRAL
+    elif contra >= threshold and contra > entail:
         verdict = Verdict.CONTRADICTED
     elif entail >= threshold:
         verdict = Verdict.SUPPORTED
