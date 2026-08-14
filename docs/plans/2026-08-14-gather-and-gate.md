@@ -2179,6 +2179,11 @@ git commit -m "feat: per-project gate calibration against a labeled seed set"
 
 ---
 
+**Amended post-implementation** (final whole-branch adversarial review, Finding 2d/7a):
+the reference code above specifies `def calibrate(signal_rows, labels, target_recall=GATE_RECALL_TARGET, floor=0.0)`. A default floor of `0.0` is the exact degenerate value the `floor` parameter's own docstring says it exists to prevent: if any single signal has zero variance among labeled-relevant papers (a realistic case — e.g. `graph` is `0.0` for every relevant paper before any citation expansion has produced a hit), `calibrate()` sets that signal's threshold to `max(0.0, 0.0) = 0.0`. Since `decide()`'s comparison is inclusive (`>=`), a threshold of exactly `0.0` is cleared by *every* candidate scoring `0.0` on that signal too — which is most of the gather set for a fresh project — so the gate silently degenerates into "keep everything," the opposite failure from what the union design protects against, but no less a defeat of the gate's purpose. The fix changes the default to a module constant `MIN_CALIBRATED_THRESHOLD = 0.05` (chosen as a small, non-zero floor that keeps `decide()`'s `>=` from admitting an untouched signal, without meaningfully narrowing recall on any signal that genuinely does separate relevant from irrelevant papers). Callers who want a literal zero floor may still pass `floor=0.0` explicitly. See `test_calibration_never_produces_a_threshold_that_admits_a_zero_scoring_signal` in `tests/test_gate.py`.
+
+---
+
 ### Task 10: The seed labeling tool
 
 **Files:**
