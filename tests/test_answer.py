@@ -18,6 +18,12 @@ BLOCKS = [
     Block(kind="heading", text="Results", page=1, section_path=("Results",)),
     Block(kind="paragraph", text="The controller reaches 94.2% tracking accuracy in gusts.",
           page=1, section_path=("Results",)),
+    Block(kind="heading", text="Limitations", page=2, section_path=("Limitations",)),
+    Block(kind="paragraph", text="Performance degrades sharply above 12 m/s wind speed.",
+          page=2, section_path=("Limitations",)),
+    Block(kind="heading", text="Discussion", page=3, section_path=("Discussion",)),
+    Block(kind="paragraph", text="Future work should explore adaptive gain scheduling for "
+                                 "extreme wind conditions.", page=3, section_path=("Discussion",)),
 ]
 PAPER = Paper(paper_id="p1", title="Gust-Robust Control", year=2025)
 QUESTION = "how accurate is the controller?"
@@ -112,7 +118,7 @@ def test_the_writer_only_ever_sees_capped_ordered_evidence(corpus):
             seen["units"] = list(units)
             return Draft()
 
-    ask(corpus, QUESTION, FakeEmbedder(), SpyWriter(), ENTAILS, max_units=1)
+    ask(corpus, QUESTION, FakeEmbedder(), SpyWriter(), ENTAILS, limit=8, max_units=1)
     assert len(seen["units"]) == 1
 
 
@@ -130,7 +136,8 @@ def test_an_empty_answer_renders_an_explicit_no_evidence_message(corpus):
 def test_the_evidence_cap_is_reported_not_hidden(corpus):
     answer = ask(corpus, QUESTION, FakeEmbedder(), FakeWriter({}), ENTAILS,
                  max_units=1, limit=8)
-    assert answer.dropped_evidence >= 0
+    assert answer.dropped_evidence > 0, "with 3 candidate units and max_units=1, capping " \
+                                        "must genuinely drop at least one"
 
 
 def test_answer_is_frozen(corpus):
