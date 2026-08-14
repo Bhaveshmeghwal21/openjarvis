@@ -140,3 +140,171 @@ def make_core_search(api_key: str, limit: int = 20) -> Callable[[str], list[dict
         ]
 
     return search
+
+
+def _arxiv_pdf(arxiv_id: str) -> str:
+    return f"https://arxiv.org/pdf/{arxiv_id}" if arxiv_id else ""
+
+
+def normalize_s2(item: dict) -> dict:
+    """Semantic Scholar graph record -> the common paper dict."""
+    ext = item.get("externalIds") or {}
+    arxiv_id = ext.get("ArXiv", "") or ""
+    pdf = item.get("openAccessPdf") or {}
+    return {
+        "doi": ext.get("DOI", "") or "",
+        "arxiv_id": arxiv_id,
+        "s2_id": item.get("paperId", "") or "",
+        "title": item.get("title", "") or "",
+        "authors": [a.get("name", "") for a in (item.get("authors") or [])],
+        "year": item.get("year"),
+        "venue": item.get("venue", "") or "",
+        "abstract": item.get("abstract", "") or "",
+        "citation_count": item.get("citationCount", 0) or 0,
+        "url": item.get("url", "") or "",
+        "pdf_url": pdf.get("url", "") or _arxiv_pdf(arxiv_id),
+        "categories": list(item.get("fieldsOfStudy") or []),
+    }
+
+
+def openalex_abstract(inverted: dict | None) -> str:
+    """Rebuild prose from OpenAlex's inverted index ({word: [positions]})."""
+    if not inverted:
+        return ""
+    positions: list[tuple[int, str]] = []
+    for word, where in inverted.items():
+        positions += [(int(i), word) for i in (where or [])]
+    return " ".join(word for _, word in sorted(positions))
+
+
+def normalize_openalex(item: dict) -> dict:
+    """OpenAlex work -> the common paper dict."""
+    doi = (item.get("doi") or "").replace("https://doi.org/", "")
+    venue = (item.get("host_venue") or {}).get("display_name", "") or ""
+    oa_url = (item.get("open_access") or {}).get("oa_url", "") or ""
+    return {
+        "doi": doi,
+        "arxiv_id": "",
+        "s2_id": "",
+        "title": item.get("title", "") or "",
+        "authors": [(a.get("author") or {}).get("display_name", "")
+                    for a in (item.get("authorships") or [])],
+        "year": item.get("publication_year"),
+        "venue": venue,
+        "abstract": openalex_abstract(item.get("abstract_inverted_index")),
+        "citation_count": item.get("cited_by_count", 0) or 0,
+        "url": item.get("id", "") or "",
+        "pdf_url": oa_url,
+        "categories": [c.get("display_name", "") for c in (item.get("concepts") or [])],
+    }
+
+
+_ARXIV_ID = re.compile(r"(\d{4}\.\d{4,5})")
+
+
+def normalize_arxiv_entry(entry: dict) -> dict:
+    """A pre-extracted arXiv Atom entry -> the common paper dict.
+
+    Takes a plain dict rather than an XML node so the mapping is testable without a feed.
+    """
+    match = _ARXIV_ID.search(entry.get("id", "") or "")
+    arxiv_id = match.group(1) if match else ""
+    published = entry.get("published", "") or ""
+    year = int(published[:4]) if published[:4].isdigit() else None
+    return {
+        "doi": entry.get("doi", "") or "",
+        "arxiv_id": arxiv_id,
+        "s2_id": "",
+        "title": " ".join((entry.get("title") or "").split()),
+        "authors": list(entry.get("authors") or []),
+        "year": year,
+        "venue": "arXiv",
+        "abstract": " ".join((entry.get("summary") or "").split()),
+        "citation_count": 0,
+        "url": entry.get("id", "") or "",
+        "pdf_url": _arxiv_pdf(arxiv_id),
+        "categories": list(entry.get("categories") or []),
+    }
+
+
+def make_s2_search(limit: int = 20) -> Callable[[str], list[dict]]:
+    """Live Semantic Scholar keyword search. Uses $S2_API_KEY when present."""
+    import os
+
+    import httpx
+
+    fields = ("paperId,title,abstract,year,venue,citationCount,externalIds,"
+              "openAccessPdf,authors,fieldsOfStudy,url")
+
+    def search(topic: str) -> list[dict]:
+        key = os.environ.get("S2_API_KEY", "")
+        try:
+            with httpx.Client(timeout=30) as client:
+                resp = client.get(
+                    "https://api.semanticscholar.org/graph/v1/paper/search",
+                    params={"query": topic, "limit": limit, "fields": fields},
+                    headers={"x-api-key": key} if key else {},
+                )
+                resp.raise_for_status()
+                items = resp.json().get("data", [])
+        except (httpx.HTTPError, ValueError):
+            return []
+        return [normalize_s2(i) for i in items]
+
+    return search
+
+
+def make_openalex_search(limit: int = 20, mailto: str = "") -> Callable[[str], list[dict]]:
+    """Live OpenAlex search. `mailto` gets you into the polite pool."""
+    import httpx
+
+    def search(topic: str) -> list[dict]:
+        params = {"search": topic, "per-page": limit}
+        if mailto:
+            params["mailto"] = mailto
+        try:
+            with httpx.Client(timeout=30) as client:
+                resp = client.get("https://api.openalex.org/works", params=params)
+                resp.raise_for_status()
+                items = resp.json().get("results", [])
+        except (httpx.HTTPError, ValueError):
+            return []
+        return [normalize_openalex(i) for i in items]
+
+    return search
+
+
+def make_arxiv_search(limit: int = 20) -> Callable[[str], list[dict]]:
+    """Live arXiv Atom search, parsed with the stdlib XML parser."""
+    import xml.etree.ElementTree as ET
+
+    import httpx
+
+    ns = {"a": "http://www.w3.org/2005/Atom", "arxiv": "http://arxiv.org/schemas/atom"}
+
+    def search(topic: str) -> list[dict]:
+        try:
+            with httpx.Client(timeout=30) as client:
+                resp = client.get("http://export.arxiv.org/api/query",
+                                  params={"search_query": f"all:{topic}",
+                                          "max_results": limit})
+                resp.raise_for_status()
+                root = ET.fromstring(resp.text)
+        except (httpx.HTTPError, ET.ParseError):
+            return []
+        out: list[dict] = []
+        for node in root.findall("a:entry", ns):
+            doi_node = node.find("arxiv:doi", ns)
+            out.append(normalize_arxiv_entry({
+                "id": (node.findtext("a:id", "", ns) or ""),
+                "title": (node.findtext("a:title", "", ns) or ""),
+                "summary": (node.findtext("a:summary", "", ns) or ""),
+                "published": (node.findtext("a:published", "", ns) or ""),
+                "authors": [n.findtext("a:name", "", ns) or ""
+                            for n in node.findall("a:author", ns)],
+                "categories": [c.get("term", "") for c in node.findall("a:category", ns)],
+                "doi": (doi_node.text if doi_node is not None else "") or "",
+            }))
+        return out
+
+    return search
