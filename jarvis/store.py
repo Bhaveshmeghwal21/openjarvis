@@ -324,8 +324,20 @@ def get_run(conn: sqlite3.Connection, run_id: str) -> dict | None:
 
 
 def set_depth(conn: sqlite3.Connection, paper_id: str, depth: str) -> None:
-    """Promote or demote a paper's ingest depth. Never deletes; `defer` is demotion."""
-    conn.execute("UPDATE papers SET depth = ? WHERE paper_id = ?", (depth, paper_id))
+    """Promote or demote a paper's ingest depth. Never deletes; `defer` is demotion.
+
+    Raises if `paper_id` has no row yet, rather than silently updating zero rows. A
+    caller that screens a candidate before saving it (e.g. citation-expanded candidates
+    from `expand_citations` persisted separately from search hits) would otherwise get no
+    error and no depth change, while `screen_log` still records a decision for a paper
+    that the corpus proper has no record of at all.
+    """
+    cursor = conn.execute("UPDATE papers SET depth = ? WHERE paper_id = ?", (depth, paper_id))
+    if cursor.rowcount == 0:
+        raise ValueError(
+            f"set_depth: no paper row for paper_id={paper_id!r} — save it first "
+            "(e.g. via save_paper/save_candidates) before screening or ingesting it"
+        )
     conn.commit()
 
 

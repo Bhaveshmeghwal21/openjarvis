@@ -323,3 +323,33 @@ def test_calibration_ignores_unlabelled_papers():
 def test_calibrated_thresholds_are_a_frozen_thresholds_instance():
     rows = _rows()
     assert isinstance(calibrate(rows, _labels(rows)), Thresholds)
+
+
+
+def test_calibration_never_produces_a_threshold_that_admits_a_zero_scoring_signal():
+    """Finding 2d/7a: a signal with zero variance among relevant papers (e.g. graph
+    proximity before any citation expansion exists) must not calibrate to a threshold
+    of 0.0 -- decide()'s >= comparison would then admit every candidate scoring 0.0 on
+    that signal too, which is the entire gather set for most signals, silently defeating
+    the gate."""
+    rows = {}
+    for i in range(20):
+        rows[f"r{i}"] = Signals(embedding=0.9, graph=0.0, keyword=0.9, llm_vote=0.0)
+    for i in range(80):
+        rows[f"n{i}"] = Signals(embedding=0.02, graph=0.0, keyword=0.02, llm_vote=0.0)
+    labels = {pid: pid.startswith("r") for pid in rows}
+
+    thresholds = calibrate(rows, labels)
+    assert thresholds.graph > 0.0
+    assert thresholds.llm_vote > 0.0
+
+    # An irrelevant paper scoring 0.0 on the degenerate signals must not be kept on
+    # those signals alone.
+    irrelevant_only_degenerate = Signals(embedding=0.0, graph=0.0, keyword=0.0, llm_vote=0.0)
+    assert decide(irrelevant_only_degenerate, thresholds) != "read_deep"
+
+
+def test_an_explicit_zero_floor_still_works_when_the_caller_wants_it():
+    rows = _rows()
+    thresholds = calibrate(rows, _labels(rows), target_recall=1.0, floor=0.0)
+    assert calibration_report(rows, _labels(rows), thresholds)["recall"] == 1.0

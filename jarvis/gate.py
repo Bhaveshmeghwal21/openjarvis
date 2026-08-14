@@ -165,6 +165,13 @@ def score_signals(candidate: Candidate, question: str, question_vector,
 DECISIONS = ("read_deep", "unsure", "defer")
 KEPT = ("read_deep", "unsure")   # matches jarvis.evaluate.KEPT_DECISIONS
 
+# A calibrated threshold below this is indistinguishable from "no threshold at all" once
+# decide()'s inclusive >= comparison is applied: a signal with zero variance among labeled
+# relevant papers (e.g. graph proximity before any citation expansion has run) would
+# otherwise calibrate to 0.0 and admit every candidate scoring 0.0 on that signal too,
+# which is the entire gather set for most signals. See Finding 2d/7a in the final review.
+MIN_CALIBRATED_THRESHOLD = 0.05
+
 
 @dataclass(frozen=True)
 class Thresholds:
@@ -225,7 +232,8 @@ def screen(conn: sqlite3.Connection, candidates: Sequence[Candidate], question: 
 
 
 def calibrate(signal_rows: Mapping[str, Signals], labels: Mapping[str, bool],
-              target_recall: float = GATE_RECALL_TARGET, floor: float = 0.0) -> Thresholds:
+              target_recall: float = GATE_RECALL_TARGET,
+              floor: float = MIN_CALIBRATED_THRESHOLD) -> Thresholds:
     """Fit per-signal thresholds to a hand-labeled seed set (spec §7B, §10).
 
     For each signal, sort the labeled-relevant papers' scores ascending and take the one
@@ -233,8 +241,13 @@ def calibrate(signal_rows: Mapping[str, Signals], labels: Mapping[str, bool],
     that bar on that signal alone; a union's recall is at least its best member's, so the
     union clears the target too.
 
-    `floor` keeps a degenerate signal (one where even irrelevant papers score high) from
-    being tuned down to admitting the entire gather set.
+    `floor` keeps a degenerate signal (one where every labeled-relevant paper scores at
+    or near zero, e.g. a project's first gather with no citation-graph hits yet) from
+    being tuned down to a threshold so low that irrelevant candidates clear it too —
+    `decide()`'s comparison is `>=`, so a threshold of exactly 0.0 admits *everything*
+    scoring 0.0 on that signal, union or not, defeating the whole point of screening.
+    Defaults to `MIN_CALIBRATED_THRESHOLD` rather than 0.0 for this reason; pass `floor=0.0`
+    explicitly if a genuinely wide-open signal is intended.
     """
     relevant = [pid for pid, is_relevant in labels.items()
                 if is_relevant and pid in signal_rows]

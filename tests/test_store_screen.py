@@ -109,3 +109,14 @@ def test_a_run_records_its_question_and_cost(conn):
     save_run(conn, "r1", question="how do quadrotors reject gusts?", cost_usd=1.25)
     assert get_run(conn, "r1")["question"] == "how do quadrotors reject gusts?"
     assert get_run(conn, "r1")["cost_usd"] == pytest.approx(1.25)
+
+
+
+
+def test_set_depth_on_a_nonexistent_paper_raises_instead_of_silently_doing_nothing(conn):
+    """Finding 1b: a bare UPDATE with no rowcount check would silently affect zero rows,
+    letting screen() log a decision and signals for a paper the corpus has no record of
+    at all -- the paper is then unreachable by get_paper/get_papers_by_depth despite the
+    gate having 'kept' it. Loud failure here is strictly better than that silent gap."""
+    with pytest.raises(ValueError, match="no paper row"):
+        set_depth(conn, "never-saved", "deep")
