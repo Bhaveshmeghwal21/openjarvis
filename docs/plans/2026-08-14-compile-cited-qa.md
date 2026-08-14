@@ -588,6 +588,106 @@ git commit -m "feat: iterative retrieval with query refinement"
 
 ---
 
+**Amended post-implementation** (Task 2 review, plan-conflict, human ruling: fix via
+cross-round RRF fusion):
+
+The reference code above accumulates each round's hits by simple round-block
+concatenation — `units.append(unit)` inside the per-round loop, deduped by `unit_id` but
+never reordered. `Retrieval.units`'s own docstring claims the result is "ranked best-first
+across all rounds," which this does not deliver: round 2's top hit — the evidence the
+refiner exists specifically to surface — always sits behind every one of round 1's hits,
+however weak, purely because round 1 ran first. Task 3's `cap()` trusts its input is
+already a valid global ranking and truncates from the front, so with the defaults `ask()`
+uses (`rounds=2`, `limit=8`, against `MAX_UNITS=12`), a later round's most relevant unit
+can be silently dropped in favor of an earlier round's weakest one.
+
+The fix reuses `jarvis.retrieve.rrf` — the same Reciprocal Rank Fusion `search()` already
+uses to fuse BM25 and vector rankings within one round — to fuse across rounds instead of
+concatenating. Each round's search results are kept as their own ranked list of
+`unit_id`s; at the end, `rrf(rankings)` fuses all of them into one genuine best-first
+order. A unit ranked highly in two different rounds (found relevant by two different
+sub-queries) is rewarded with a higher combined score, which is the correct behavior, not
+an edge case to special-case away. `rrf` on a single-round list reproduces that round's
+original order exactly (its score `1/(k+rank)` is strictly decreasing in rank), so
+`refiner=None`'s single-shot path is unaffected.
+
+Corrected `retrieve_iteratively`:
+
+```python
+def retrieve_iteratively(conn: sqlite3.Connection, question: str, embedder: Embedder, *,
+                         refiner: Refiner | None = None, rounds: int = 3, limit: int = 8,
+                         reranker: Reranker | None = None) -> Retrieval:
+    """Search, refine, search again. Stops on the budget, a repeat, or a `None` refinement.
+
+    Units are fused across rounds with the same Reciprocal Rank Fusion `search()` already
+    uses to fuse BM25 and vector rankings within one round: a unit ranked highly by two
+    different rounds is genuinely more likely relevant, and a later round's top hit is
+    never buried behind an earlier round's weaker one just because it arrived first.
+    """
+    queries: list[str] = [question]
+    seen_queries = {question}
+    rankings: list[list[str]] = []
+    by_id: dict[str, Unit] = {}
+    accumulated: list[Unit] = []
+    seen_units: set[str] = set()
+    completed = 0
+
+    while completed < max(1, rounds):
+        query = queries[completed]
+        round_ids: list[str] = []
+        for unit in search(conn, query, embedder, limit=limit, reranker=reranker):
+            round_ids.append(unit.unit_id)
+            by_id.setdefault(unit.unit_id, unit)
+            if unit.unit_id not in seen_units:
+                seen_units.add(unit.unit_id)
+                accumulated.append(unit)
+        rankings.append(round_ids)
+        completed += 1
+
+        if refiner is None or completed >= rounds:
+            break
+        try:
+            nxt = refiner.refine(question, tuple(queries), tuple(accumulated))
+        except Exception:  # noqa: BLE001 - keep everything retrieved so far
+            break
+        if not nxt or nxt in seen_queries:
+            break
+        seen_queries.add(nxt)
+        queries.append(nxt)
+
+    ordered = [by_id[uid] for uid, _ in rrf(rankings) if uid in by_id]
+    return Retrieval(question=question, units=tuple(ordered), queries=tuple(queries),
+                     rounds=completed)
+```
+
+Add `from jarvis.retrieve import Reranker, rrf, search` (the module already imports
+`Reranker` and `search` from the same line; `rrf` joins them). `accumulated` — the deduped,
+round-arrival-order list — is what the refiner sees each round (unaffected by the fusion
+change; a refiner reasoning about "what's been found so far" cares about coverage, not
+final rank). `ordered` — the RRF-fused list — is what `Retrieval.units` actually holds,
+now honestly matching its own docstring.
+
+**Also amended** (same review, test-coverage gap in the reference test, not a code
+defect): `test_units_are_deduped_across_rounds`'s reference code above used
+`refiner=FakeRefiner(["tracking accuracy"] * 3)` — a refined query identical to the seed
+question, which trips the repeated-query stop condition before a second round ever runs.
+The test's assertion was trivially true: a single `search()` call already returns unique
+`unit_id`s on its own, so the test passed without ever exercising the cross-round fusion
+path it claims to cover. Corrected to force two rounds with genuinely different queries,
+which — given this fixture's two-unit corpus — reliably return overlapping unit sets so
+the dedup/fusion path is actually proven:
+
+```python
+def test_units_are_deduped_across_rounds(corpus):
+    result = retrieve_iteratively(corpus, "tracking accuracy", FakeEmbedder(),
+                                  refiner=FakeRefiner(["wind speed limitations"]), rounds=2)
+    ids = [u.unit_id for u in result.units]
+    assert len(ids) == len(set(ids))
+    assert result.rounds == 2, "both rounds must actually run for this test to mean anything"
+```
+
+---
+
 ### Task 3: The writer and its claim triples
 
 **Files:**
