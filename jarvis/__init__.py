@@ -10,8 +10,11 @@ now also complete: multi-source search, citation-graph expansion, a calibrated u
 with no exclude outcome, deep read into the corpus, and verified Layer 2 cards. Compile
 — cited Q&A (spec step 7) is now also complete: end-to-end question answering with
 evidence capping, retrieval refinement, deterministic quote verification, and entailment
-filtering. MCP, contradiction detection, and long-form reports (spec steps 8-10) are not
-yet built.
+filtering. MCP server (spec step 8) is now also complete: the corpus exposed as tools
+(`corpus_search`, `get_unit`, `get_paper`, `list_papers`, `verify_quote`, `ask`) over a
+pure dispatcher in `jarvis.tools`, with a thin stdio adapter in `jarvis.mcp_server`
+(imports `mcp` lazily, not exported from this package). Contradiction detection and
+long-form reports (spec steps 9-10) are not yet built.
 """
 from __future__ import annotations
 
@@ -110,12 +113,14 @@ from jarvis.store import (
     set_depth,
 )
 from jarvis.text import approx_tokens, find_span, normalize
+from jarvis.tools import REGISTRY, ToolContext, ToolSpec, call_tool, tool_specs, unit_payload
 from jarvis.units import build_units
 from jarvis.verify import HFNLI, FakeNLI, verify_claim
 from jarvis.writer import Draft, FakeWriter, LLMWriter, Writer, claims_from_json
 
 __all__ = [
     "HFNLI",
+    "REGISTRY",
     "Answer",
     "BGEEmbedder",
     "Block",
@@ -155,6 +160,8 @@ __all__ = [
     "TemplatePlanner",
     "TemplatePrefix",
     "Thresholds",
+    "ToolContext",
+    "ToolSpec",
     "Unit",
     "UnitType",
     "Verdict",
@@ -167,6 +174,7 @@ __all__ = [
     "build_units",
     "calibrate",
     "calibration_report",
+    "call_tool",
     "cap",
     "citation_precision",
     "citation_recall",
@@ -229,6 +237,8 @@ __all__ = [
     "search",
     "set_depth",
     "to_paper",
+    "tool_specs",
+    "unit_payload",
     "unverified_fields",
     "vector_search",
     "verify_card",
