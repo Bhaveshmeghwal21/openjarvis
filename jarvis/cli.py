@@ -38,7 +38,6 @@ from jarvis.ingest import failed, ingest_decided
 from jarvis.label import label_progress, read_labels, sample_seed, write_label_sheet
 from jarvis.models import Claim
 from jarvis.report import corpus_cards, render_report, write_report
-from jarvis.router import ModelRouter
 from jarvis.sources import (
     combine_sources,
     make_arxiv_search,
@@ -291,7 +290,7 @@ def cmd_gather(conn, args: argparse.Namespace) -> int:
     run_id = uuid.uuid4().hex[:12]
     started_at = time.strftime("%Y-%m-%dT%H:%M:%S")
     config = Config.load()
-    router = ModelRouter(overrides=config.model_overrides)
+    router = build_router(config)
 
     try:
         return _run_gather(conn, args, config, router, run_id)
@@ -398,7 +397,7 @@ def _run_gather(conn, args: argparse.Namespace, config: Config, router,
 def cmd_ask(conn, args: argparse.Namespace) -> int:
     """Thin wrapper over `ask()` -> `render_answer()`. Needs a writer and an NLI model."""
     config = Config.load()
-    router = ModelRouter(overrides=config.model_overrides)
+    router = build_router(config)
     try:
         embedder = build_embedder(config)
         writer = build_writer(config, router)
@@ -431,7 +430,7 @@ def cmd_report(conn, args: argparse.Namespace) -> int:
         return 1
 
     config = Config.load()
-    router = ModelRouter(overrides=config.model_overrides)
+    router = build_router(config)
     try:
         embedder = build_embedder(config)
         writer = build_writer(config, router)
