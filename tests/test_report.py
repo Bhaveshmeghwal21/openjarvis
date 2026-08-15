@@ -327,3 +327,75 @@ def test_report_is_frozen(corpus):
     result = write_report(corpus, "t", outline, FakeEmbedder(), FakeWriter({}), ENTAILS)
     with pytest.raises(FrozenInstanceError):
         result.coverage = 1.0
+
+
+from jarvis.report import render_report
+
+
+def _one_section_report(corpus, quote, text="The controller reaches 94.2%.", nli=ENTAILS):
+    unit = _unit(corpus, "p1", "94.2")
+    writer = FakeWriter({"q1": Draft(text="Summary prose.",
+                                     claims=(Claim("a-0", text, unit.unit_id, quote),))})
+    outline = Outline(topic="gusts", sections=(Section(title="Results", question="q1"),))
+    return write_report(corpus, "gusts", outline, FakeEmbedder(), writer, nli)
+
+
+def test_the_report_renders_its_topic_and_section_titles(corpus):
+    text = render_report(corpus, _one_section_report(corpus, "94.2% tracking accuracy"))
+    assert "gusts" in text
+    assert "## Results" in text
+
+
+def test_supported_claims_are_rendered_with_their_unit_id(corpus):
+    report = _one_section_report(corpus, "94.2% tracking accuracy")
+    text = render_report(corpus, report)
+    assert report.all_claims[0].unit_id in text
+
+
+def test_blocked_claims_appear_only_as_a_count(corpus):
+    report = _one_section_report(corpus, "99.9% tracking accuracy",
+                                 text="The controller reaches 99.9%.")
+    text = render_report(corpus, report)
+    assert "99.9" not in text
+    assert "removed" in text.lower()
+
+
+def test_flagged_claims_are_labelled_as_unverified(corpus):
+    report = _one_section_report(corpus, "94.2% tracking accuracy", nli=NEUTRAL)
+    assert "unverified" in render_report(corpus, report).lower()
+
+
+def test_flagged_claims_can_be_suppressed(corpus):
+    report = _one_section_report(corpus, "94.2% tracking accuracy", nli=NEUTRAL)
+    assert "unverified" not in render_report(corpus, report, include_flagged=False).lower()
+
+
+def test_references_list_every_cited_paper(corpus):
+    text = render_report(corpus, _one_section_report(corpus, "94.2% tracking accuracy"))
+    assert "## References" in text
+    assert "Paper p1" in text
+
+
+def test_uncited_papers_are_absent_from_the_references(corpus):
+    text = render_report(corpus, _one_section_report(corpus, "94.2% tracking accuracy"))
+    assert "Paper p2" not in text
+
+
+def test_a_retracted_cited_paper_is_marked(corpus):
+    save_paper(corpus, Paper(paper_id="p1", title="Paper p1", year=2025, retracted=True),
+               depth="deep")
+    text = render_report(corpus, _one_section_report(corpus, "94.2% tracking accuracy"))
+    assert "RETRACTED" in text
+
+
+def test_the_report_states_its_own_coverage(corpus):
+    text = render_report(corpus, _one_section_report(corpus, "94.2% tracking accuracy"))
+    assert "overage" in text
+
+
+def test_an_empty_report_renders_without_pretending_otherwise(corpus):
+    outline = Outline(topic="gusts", sections=(Section(title="R", question="zzz qqq"),))
+    report = write_report(corpus, "gusts", outline, FakeEmbedder(), FakeWriter({}), ENTAILS)
+    text = render_report(corpus, report)
+    assert "## References" in text
+    assert "no " in text.lower()

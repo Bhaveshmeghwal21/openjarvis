@@ -23,7 +23,7 @@ from jarvis.models import Card, Claim, Unit, Verdict, Verification
 from jarvis.outline import Outline, Outliner, Section
 from jarvis.retrieve import Reranker
 from jarvis.retriever import Refiner, retrieve_iteratively
-from jarvis.store import all_units, get_card, get_papers_by_depth
+from jarvis.store import all_units, get_card, get_paper, get_papers_by_depth
 from jarvis.text import normalize
 from jarvis.verify import NLIModel, verify_claim
 from jarvis.writer import Writer
@@ -218,3 +218,61 @@ def evaluate_report(report: Report) -> EvalReport:
     return eval_report(list(report.all_verifications),
                        cited=report.cited_unit_ids,
                        corpus=report.corpus_unit_ids)
+
+
+def _render_section(draft: SectionDraft, include_flagged: bool) -> list[str]:
+    lines = [f"## {draft.section.title}", ""]
+
+    body = [f"{draft.claim_for(v.claim_id).text} [{draft.claim_for(v.claim_id).unit_id}]"
+            for v in draft.supported if draft.claim_for(v.claim_id) is not None]
+    lines += [" ".join(body) if body else "_No verified evidence for this section._", ""]
+
+    if include_flagged and draft.flagged:
+        lines.append("**Unverified** — the quote is real but does not clearly support "
+                     "the claim:")
+        lines.append("")
+        for verification in draft.flagged:
+            claim = draft.claim_for(verification.claim_id)
+            if claim is not None:
+                lines.append(f"- {claim.text} [{claim.unit_id}] "
+                             f"({verification.verdict.value})")
+        lines.append("")
+
+    if draft.blocked:
+        lines += [(f"_{len(draft.blocked)} claim(s) removed: quote not found in any "
+                   f"source paper._"), ""]
+    return lines
+
+
+def render_report(conn: sqlite3.Connection, report: Report, *,
+                  include_flagged: bool = True) -> str:
+    """Markdown. Blocked claims are absent, flagged ones labelled, coverage always stated."""
+    lines = [f"# {report.topic}", ""]
+    for draft in report.sections:
+        lines += _render_section(draft, include_flagged)
+
+    lines += ["## References", ""]
+    cited = sorted(report.cited_paper_ids)
+    if not cited:
+        lines += ["_No papers were cited: no claim in this report could be grounded._", ""]
+    for paper_id in cited:
+        paper = get_paper(conn, paper_id)
+        if paper is None:
+            lines.append(f"- [{paper_id}] (not in corpus)")
+            continue
+        year = f" ({paper.year})" if paper.year else ""
+        venue = f". {paper.venue}" if paper.venue else ""
+        doi = f". doi:{paper.doi}" if paper.doi else ""
+        flag = "  **RETRACTED**" if paper.retracted else ""
+        lines.append(f"- [{paper.paper_id}] {paper.title}{year}{venue}{doi}{flag}")
+
+    verifications = report.all_verifications
+    supported = sum(1 for v in verifications if v.verdict is Verdict.SUPPORTED)
+    lines += [
+        "",
+        "---",
+        "",
+        (f"Coverage: {report.coverage:.1%} of {report.corpus_units} deep-read corpus "
+         f"units were cited. {supported}/{len(verifications)} claims verified."),
+    ]
+    return "\n".join(lines)
