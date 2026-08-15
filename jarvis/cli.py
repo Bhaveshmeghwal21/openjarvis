@@ -14,10 +14,30 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
+import uuid
 from pathlib import Path
 
+from jarvis.card import extract_and_verify
 from jarvis.config import Config
-from jarvis.store import close_store, get_papers_by_depth, open_store
+from jarvis.fetch import fetch_pdf
+from jarvis.gate import screen
+from jarvis.gather import Candidate, gather, save_candidates
+from jarvis.ingest import failed, ingest_decided
+from jarvis.router import ModelRouter
+from jarvis.sources import (
+    combine_sources,
+    make_arxiv_search,
+    make_crossref_search,
+    make_openalex_search,
+    make_s2_search,
+)
+from jarvis.store import (
+    close_store,
+    get_papers_by_depth,
+    open_store,
+    save_run,
+)
 
 DEPTHS = ("deep", "pending_deep", "metadata", "abstract")
 
@@ -174,8 +194,151 @@ def cmd_status(conn, args: argparse.Namespace) -> int:
     return 0
 
 
+def _resumable_candidates(conn) -> list[Candidate]:
+    """Papers already at `pending_deep` from an earlier run's screen. Re-running `gather`
+    must pick up these rather than re-searching from scratch (spec §8) -- the depth
+    transition already encodes progress; only the fields `Candidate`/`to_paper` read are
+    reconstructed, which is exactly the subset `ingest_decided`'s `path_for` and
+    `to_paper` actually consume.
+
+    `citation_graph.paper_id()` resolves a candidate dict's id from `arxiv_id` first,
+    then `s2_id`, falling back to a title prefix only when both are empty -- a paper
+    stored with neither field populated (real for many sources) would otherwise
+    reconstruct to a *different* id than `papers.paper_id` already on file, silently
+    breaking every subsequent `save_paper`/`set_depth` lookup keyed on the original id.
+    Putting the stored `paper_id` itself into `arxiv_id` when it is empty keeps
+    `paper_id(candidate.paper) == paper.paper_id` exactly (`paper_id()` checks `arxiv_id`
+    before `s2_id`, so this is decisive regardless of whether `s2_id` is also set).
+    """
+    out = []
+    for paper in get_papers_by_depth(conn, "pending_deep"):
+        out.append(Candidate(paper={
+            "id": paper.paper_id, "title": paper.title, "authors": list(paper.authors),
+            "year": paper.year, "venue": paper.venue, "doi": paper.doi,
+            "arxiv_id": paper.arxiv_id or paper.paper_id, "s2_id": paper.s2_id,
+            "abstract": paper.abstract, "citation_count": paper.citation_count,
+            "retracted": paper.retracted, "pdf_url": paper.source_path,
+        }))
+    return out
+
+
+def cmd_gather(conn, args: argparse.Namespace) -> int:
+    """Stages A-C end to end: search -> screen -> [confirm] -> fetch -> ingest -> cards.
+
+    Owns one `ModelRouter` for the whole run and writes its measured cost via `save_run`
+    in a `finally`, so a run that fails midway still records what it spent (spec §5.3) --
+    a cost number that only appears on success is not a cost control.
+    """
+    run_id = uuid.uuid4().hex[:12]
+    started_at = time.strftime("%Y-%m-%dT%H:%M:%S")
+    config = Config.load()
+    router = ModelRouter(overrides=config.model_overrides)
+
+    try:
+        return _run_gather(conn, args, config, router, run_id)
+    finally:
+        save_run(conn, run_id, question=args.question, started_at=started_at,
+                 cost_usd=router.cost.total_cost)
+
+
+def _run_gather(conn, args: argparse.Namespace, config: Config, router,
+                run_id: str) -> int:
+    resumed = _resumable_candidates(conn)
+    if resumed:
+        print(f"resuming {len(resumed)} paper(s) already screened as pending_deep "
+              f"— skipping search and screen")
+        candidates = resumed
+        decisions = {c.pid: "read_deep" for c in candidates}
+    else:
+        try:
+            planner = build_planner(config, router)
+        except ModelBuildError:
+            from jarvis.gather import TemplatePlanner
+            planner = TemplatePlanner()
+
+        search_fn = combine_sources(
+            make_arxiv_search(limit=args.limit),
+            make_s2_search(limit=args.limit),
+            make_openalex_search(limit=args.limit, mailto=config.unpaywall_email or ""),
+            make_crossref_search(rows=args.limit),
+        )
+        candidates = gather(args.question, planner, search_fn, budget=args.budget)
+        save_candidates(conn, candidates)
+        print(f"found {len(candidates)} candidate(s)")
+        if not candidates:
+            print("nothing found — stopping before screen")
+            return 0
+
+        try:
+            embedder = build_embedder(config)
+        except ModelBuildError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        try:
+            voter = build_voter(config, router)
+        except ModelBuildError:
+            voter = None
+
+        decisions = screen(conn, candidates, args.question, embedder, voter=voter,
+                           run_id=run_id)
+
+    from jarvis.gate import KEPT
+    kept_count = sum(1 for d in decisions.values() if d in KEPT)
+    print(f"screen: {kept_count}/{len(decisions)} kept for deep read")
+
+    if not args.yes:
+        print("pausing before deep reads — pass --yes to fetch, parse, embed, and "
+              "extract cards for the kept papers (this is the point a run starts "
+              "costing more than search API calls)")
+        return 0
+
+    try:
+        parser = build_parser(config)
+        embedder = build_embedder(config)
+    except ModelBuildError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    cache_dir = Path(resolve_db_path(project=args.project, db=args.db)).parent / "pdfs"
+
+    def path_for(candidate: Candidate) -> str:
+        return fetch_pdf(candidate.paper, cache_dir, unpaywall_email=config.unpaywall_email or "",
+                        paper_id=candidate.pid) or ""
+
+    results = ingest_decided(conn, decisions, candidates, parser, embedder,
+                             path_for=path_for)
+    ok = [r for r in results if r.ok]
+    bad = failed(results)
+    print(f"ingested {len(ok)} paper(s), {len(bad)} failed")
+    for r in bad:
+        print(f"  failed: {r.paper_id} — {r.error}")
+
+    if ok:
+        try:
+            extractor = build_card_extractor(config, router)
+        except ModelBuildError as exc:
+            print(f"error: cannot extract cards: {exc}", file=sys.stderr)
+            return 1
+        extracted = 0
+        for result in ok:
+            paper = next((c for c in candidates if c.pid == result.paper_id), None)
+            if paper is None:
+                continue
+            from jarvis.gather import to_paper
+            try:
+                extract_and_verify(conn, to_paper(paper), extractor)
+                extracted += 1
+            except Exception as exc:  # noqa: BLE001 - one card failing is not the run failing
+                print(f"  card extraction failed: {result.paper_id} — {exc}",
+                      file=sys.stderr)
+        print(f"extracted {extracted}/{len(ok)} card(s)")
+
+    return 0
+
+
 COMMANDS = {
     "status": cmd_status,
+    "gather": cmd_gather,
 }
 
 
@@ -183,14 +346,29 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="jarvis")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    for name in COMMANDS:
-        p = sub.add_parser(name)
-        p.add_argument("--project", default=None,
-                       help="project name, resolved under $JARVIS_PROJECT_ROOT")
-        p.add_argument("--db", default=None,
-                       help="explicit corpus db path, overrides --project")
+    status_p = sub.add_parser("status")
+    _add_store_args(status_p)
+
+    gather_p = sub.add_parser("gather")
+    _add_store_args(gather_p)
+    gather_p.add_argument("question", help="the research question to gather papers on")
+    gather_p.add_argument("--yes", action="store_true",
+                          help="proceed through deep reads and card extraction without "
+                               "pausing for confirmation")
+    gather_p.add_argument("--budget", type=int, default=200,
+                          help="max citation-graph-expanded candidates (gather()'s own "
+                               "budget parameter)")
+    gather_p.add_argument("--limit", type=int, default=20,
+                          help="max results per search query, per source")
 
     return parser
+
+
+def _add_store_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--project", default=None,
+                        help="project name, resolved under $JARVIS_PROJECT_ROOT")
+    parser.add_argument("--db", default=None,
+                        help="explicit corpus db path, overrides --project")
 
 
 def main(argv: list[str] | None = None) -> int:
