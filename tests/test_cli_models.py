@@ -45,6 +45,21 @@ def test_build_writer_fails_naming_the_missing_api_key():
         build_writer(_cfg(base_url="http://x"), build_router(_cfg()))
 
 
+def test_build_writer_rejects_whitespace_only_base_url():
+    # A whitespace-only value is truthy in Python and would otherwise pass a bare
+    # `if not config.base_url` check, reach openai.OpenAI(...), and fail there inside
+    # an LLM* class's own broad except -- producing the exact "looks like no evidence"
+    # silent outcome this fail-loud contract exists to prevent. Found by a final
+    # whole-branch adversarial review; reproduced independently before fixing.
+    with pytest.raises(ModelBuildError, match="JARVIS_BASE_URL"):
+        build_writer(_cfg(base_url="   ", api_key="k"), build_router(_cfg()))
+
+
+def test_build_writer_rejects_whitespace_only_api_key():
+    with pytest.raises(ModelBuildError, match="JARVIS_API_KEY"):
+        build_writer(_cfg(base_url="http://x", api_key="   "), build_router(_cfg()))
+
+
 def test_build_writer_succeeds_when_both_present():
     writer = build_writer(_cfg(base_url="http://x", api_key="k"), build_router(_cfg()))
     assert writer is not None

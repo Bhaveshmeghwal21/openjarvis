@@ -75,12 +75,20 @@ def _require_chat_credentials(config: Config) -> None:
     values here (populated from the same environment by `Config.load()`) fails loud
     before any `LLM*` class's own `try/except` around `chat_fn()` would otherwise
     swallow the resulting `openai` error and quietly fall back to an empty/neutral
-    result that looks like "no evidence" rather than "misconfigured"."""
-    if not config.base_url:
+    result that looks like "no evidence" rather than "misconfigured".
+
+    Strips before checking: a whitespace-only value (`JARVIS_API_KEY="   "`, a realistic
+    copy-paste artifact from a shell export) is truthy in Python and would otherwise pass
+    this check, reach `openai.OpenAI(...)`, fail there with a connection/auth error inside
+    an `LLM*` class's own broad `except Exception`, and silently produce the exact
+    "empty draft, looks like no evidence" outcome this check exists to prevent —
+    contradicting the fail-loud contract this function is named for.
+    """
+    if not (config.base_url or "").strip():
         raise ModelBuildError(
             "JARVIS_BASE_URL is not set — required to construct a real model client"
         )
-    if not config.api_key:
+    if not (config.api_key or "").strip():
         raise ModelBuildError(
             "JARVIS_API_KEY is not set — required to construct a real model client"
         )
@@ -168,11 +176,29 @@ def resolve_db_path(*, project: str | None, db: str | None) -> Path:
     Exits with a named error (never a bare traceback) when neither is given — every
     subcommand needs to know which corpus it is operating on, and guessing would be
     worse than asking.
+
+    `--project` is a name, not a path, and is never sanitized by `Config.project_dir`
+    itself (plain `Path.__truediv__`, which accepts `..` and absolute overrides
+    unconditionally) — an operator running this on a shared or automated system could
+    otherwise point `--project ../../../etc` (or an absolute path) at an arbitrary
+    location on disk, entirely outside `$JARVIS_PROJECT_ROOT`, and every subsequent
+    subcommand would read/write corpus data, PDFs, and review sheets there without any
+    indication anything unusual happened. Resolved and checked here, once, for every
+    subcommand that reaches this function — rather than requiring each of the 8
+    subcommands' own file-writing code (fetch cache, report sidecars, review sheets,
+    label sheets) to defend against it separately.
     """
     if db:
         return Path(db)
     if project:
-        return Config.load().project_dir(project) / "corpus.db"
+        root = Config.load().project_root.resolve()
+        candidate = (root / project).resolve()
+        if candidate != root and root not in candidate.parents:
+            print(f"error: --project {project!r} resolves outside the project root "
+                  f"({root}) — project names must not contain '..' or be absolute paths",
+                  file=sys.stderr)
+            raise SystemExit(2)
+        return candidate / "corpus.db"
     print("error: one of --project or --db is required", file=sys.stderr)
     raise SystemExit(2)
 

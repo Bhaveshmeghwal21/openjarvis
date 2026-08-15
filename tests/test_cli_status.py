@@ -26,6 +26,33 @@ def test_resolve_db_path_requires_project_or_db():
         resolve_db_path(project=None, db=None)
 
 
+def test_resolve_db_path_rejects_a_project_name_that_escapes_the_project_root(
+    tmp_path, monkeypatch
+):
+    # --project is a name, not a path -- Config.project_dir does a plain Path.__truediv__
+    # with no sanitization, so an unsanitized value here would let a hostile or
+    # accidental --project "../../../etc" (or an absolute path) point every subsequent
+    # subcommand's file I/O at an arbitrary location entirely outside
+    # $JARVIS_PROJECT_ROOT. Found by a final whole-branch adversarial review;
+    # reproduced independently before fixing.
+    monkeypatch.setenv("JARVIS_PROJECT_ROOT", str(tmp_path))
+    with pytest.raises(SystemExit):
+        resolve_db_path(project="../../../etc", db=None)
+
+
+def test_resolve_db_path_rejects_an_absolute_path_as_a_project_name(tmp_path, monkeypatch):
+    monkeypatch.setenv("JARVIS_PROJECT_ROOT", str(tmp_path))
+    escape_target = tmp_path.parent / "elsewhere"
+    with pytest.raises(SystemExit):
+        resolve_db_path(project=str(escape_target), db=None)
+
+
+def test_resolve_db_path_accepts_an_ordinary_project_name(tmp_path, monkeypatch):
+    monkeypatch.setenv("JARVIS_PROJECT_ROOT", str(tmp_path))
+    path = resolve_db_path(project="my-question", db=None)
+    assert path == (tmp_path / "my-question" / "corpus.db").resolve()
+
+
 def test_status_on_nonexistent_project_is_a_clean_named_error(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("JARVIS_PROJECT_ROOT", str(tmp_path))
     # A nonexistent project should not raise a traceback -- open_store would happily
