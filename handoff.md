@@ -1,373 +1,150 @@
 # Handoff — jarvis
 
-Updated 2026-08-15 (ninth update). Supersedes the prior version, which described step 9
-(contradiction detection) as complete but unmerged. It is now merged to `main` and pushed.
-**All ten spec build steps now exist on `main`.**
+Updated 2026-08-15 (tenth update). Supersedes the prior version, which described the CLI
+spec as fully designed but not yet built.
 
-**State in one line:** spec build steps 1–10 are all on `main` and pushed. There are no
-remaining implementation plans. What's left is measurement and hardening — see "What comes
-next" below.
+**State in one line:** all ten spec build steps plus the CLI (`docs/specs/2026-08-15-cli-and-operations.md`)
+are complete. The CLI is on branch `cli-and-operations`, tested, adversarially reviewed,
+fixed, **not yet merged.** Once it merges, the system can be run for the first time.
 
 ## Orient yourself in 60 seconds
 
 ```
-main:  4edbb3f (steps 1-10), pushed, in sync with origin
+main:                997a1a4 (all 10 spec steps), pushed, in sync with origin
+cli-and-operations:  branched from 997a1a4, HEAD at 817a5e2, NOT YET MERGED
 ```
 
 | What | Where |
 |---|---|
-| **The next work: CLI + operations spec** — no plan written yet | `docs/specs/2026-08-15-cli-and-operations.md` |
-| The original design spec — read this first for context | `docs/specs/2026-08-11-research-corpus-agent-design.md` |
-| Completed plan, steps 1-5 | `docs/plans/2026-08-11-verifiable-single-paper-core.md` |
-| Completed plan, step 6 | `docs/plans/2026-08-14-gather-and-gate.md` |
-| Completed plan, step 7 | `docs/plans/2026-08-14-compile-cited-qa.md` |
-| Completed plan, step 8 | `docs/plans/2026-08-14-mcp-server.md` |
-| Completed plan, step 9 | `docs/plans/2026-08-14-contradiction-detection.md` |
-| Completed plan, step 10 | `docs/plans/2026-08-14-longform-reports.md` |
-| Record of steps 1-5's build + review | `LEDGER.md` (on `main`) |
-| Record of step 6's build + two-round review | `LEDGER-gather-and-gate.md` (on `main`) |
-| Record of step 7's build + review | `LEDGER-compile-cited-qa.md` (on `main`) |
-| Record of step 8's build + review | `LEDGER-mcp-server.md` (on `main`) |
-| Record of step 9's build + review | `LEDGER-contradiction-detection.md` (on `main`) |
-| Record of step 10's build + review | `LEDGER-longform-reports.md` (on `main`) |
+| The CLI spec | `docs/specs/2026-08-15-cli-and-operations.md` |
+| The original design spec | `docs/specs/2026-08-11-research-corpus-agent-design.md` |
+| Record of the CLI's build + review (on `cli-and-operations`, unmerged) | `LEDGER-cli.md` |
+| Records of all 10 spec build steps' build + review | `LEDGER.md`, `LEDGER-gather-and-gate.md`, `LEDGER-compile-cited-qa.md`, `LEDGER-mcp-server.md`, `LEDGER-contradiction-detection.md`, `LEDGER-longform-reports.md` (all on `main`) |
 
 ```
 main:
-  HEAD:   4edbb3f  merge: contradiction detection (spec build step 9)
+  HEAD:   997a1a4  docs: full CLI task breakdown in handoff, executable in one pass
   tests:  569 passing
   ruff:   11 pre-existing violations, zero new
   remote: origin -> https://github.com/Bhaveshmeghwal21/openjarvis (public), pushed, in sync
+
+cli-and-operations (unmerged):
+  HEAD:   817a5e2  docs: ledger for cli-and-operations
+  tests:  631 passing (569 baseline + 62 new)
+  ruff:   still exactly 11 pre-existing violations, zero new
 ```
 
 ## What changed since the last handoff
 
-**Contradiction detection (spec build step 9) — the last of the ten spec build steps —
-was merged into `main` and pushed.** Verified independently rather than taken on trust:
-full suite re-run on `main` post-merge (569 passing, exit 0), `ruff check .` at the
-11-violation baseline, and the specific claim in the branch's own ledger — that
-`jarvis/contradict.py`'s `rank()` reuses `jarvis.answer._dedupe_claim_ids` rather than
-reinventing a fix — confirmed directly by grep: `jarvis/contradict.py:26` imports it,
-`jarvis/contradict.py:136` calls it. Same for `jarvis/report.py` (long-form reports,
-step 10), which imports both `_dedupe_claim_ids` and `_drop_citations_outside_evidence`
-from `jarvis.answer` at line 18. Both now-merged worktrees and local branches were removed.
+**The CLI (`docs/specs/2026-08-15-cli-and-operations.md`) was fully executed** on a new
+worktree and branch, in one continuous session: all 8 plan tasks implemented directly, a
+final whole-branch adversarial review, a fix wave, a rigorous self-mutation-test in place
+of a full independent re-review (justified since no Critical finding occurred), and a
+ledger. Not yet merged.
 
-The corpus can now surface where one paper contradicts another, as ranked candidates for a
-human to review — never as assertions. `jarvis/contradict.py` retrieves cross-paper
-evidence topically close to a claim, reuses the verification pass's own NLI model to score
-disagreement (free — NLI already computes the contradiction label), ranks candidates, and
-runs a full human-review round-trip a precision metric
-(`jarvis.evaluate.contradiction_precision`, target ≥0.70, ContraCrow parity) is measured
-against — not yet measured on a real corpus; see Loose ends.
+**The system can now be operated end to end from one command, `jarvis`**, once merged:
+`jarvis status/gather/ask/report/contradictions/review/calibrate/mcp`. Three real pipeline
+gaps found by reading the code (not the plans) were closed as part of this build:
 
-## THE CLAIM-ID-COLLISION PATTERN — READ THIS BEFORE TOUCHING ANY CODE THAT AGGREGATES CLAIMS
+1. **No PDF acquisition step existed.** New `jarvis/fetch.py` downloads and caches PDFs,
+   verifying `%PDF` magic bytes rather than trusting a `content-type` header or a URL
+   shape — a paywall's HTML login page saved at a PDF-looking URL is now a fetch failure,
+   not a garbage parse.
+2. **Card extraction was never called outside tests.** `cmd_gather` now calls
+   `extract_and_verify` per successfully-ingested paper. Without this, `write_report`'s
+   outline generation (which reads `corpus_cards(conn)`) would produce an empty report on
+   any real gathered corpus, and it would look like a report bug.
+3. **Nothing wrote `runs.cost_usd`.** `cmd_gather` owns one `ModelRouter` for the whole
+   run and writes its measured cost via `save_run` in a `finally`, so a run that crashes
+   mid-gather still records what it spent.
 
-**This is now a three-time-confirmed structural hazard in this codebase, found Critical on
-three separate branches:**
+A fourth gap, not named in the spec but found while building `jarvis contradictions`:
+**there was no report-persistence layer anywhere** — `write_report` returns a `Report`
+held only in memory, and spec §9's own resolution ("scan claims from the most recent
+report") is unimplementable without something to persist. `cmd_report` now writes a small
+JSON claims sidecar next to its markdown for `cmd_contradictions` to read later.
 
-1. `compile-cited-qa` — `Answer.claim_for`'s first-match lookup let a blocked claim's
-   fabricated text render as if it were the supported claim sharing its id.
-2. `longform-reports` — `draft_section` omitted the same defense `ask()` applies,
-   reproducing the identical exploit at section scope.
-3. `contradiction-detection` — `rank()`'s `(claim_id, unit_id)` dedup key silently
-   misattributed which claim a piece of cross-paper evidence actually contradicts, when
-   two distinct claims shared an id.
+## THE CLAIM-ID-COLLISION PATTERN — STILL THE MOST IMPORTANT THING IN THIS FILE
 
-**The root cause is the same every time**: any function that looks up or aggregates
-`Claim`/claim-derived objects by `claim_id` implicitly assumes the id is unique. `Writer`
-(and any future claim-producing boundary) is explicitly documented as untrusted —
-`claims_from_json` enforces uniqueness internally, but nothing on the *consuming* side
-enforces it structurally, and it is easy to add a new function that touches claims without
-remembering this.
+Checked a **fourth time** on this branch (`cmd_ask`/`cmd_report`/`cmd_contradictions` all
+handle `Claim` objects, and `cmd_report`'s new JSON sidecar round-trips them for later
+reuse). **Not found this time** — `scan_corpus`'s established `_dedupe_claim_ids` guard
+correctly neutralizes a colliding-claim-id sidecar round-trip before any lookup happens,
+confirmed live. This is now the pattern's fourth clean check-and-confirm after three real
+Critical findings on three separate prior branches, which is exactly what having it as a
+mandatory pre-flight/review checklist item is for.
 
-**The established, working fix, applied identically all three times, and confirmed still
-in place after this handoff's own verification pass**: import and apply
-`jarvis.answer._dedupe_claim_ids` (and, where citations are checked against a bounded
-evidence set, also `_drop_citations_outside_evidence`) at the entry point of any new
-function that receives a `Sequence[Claim]` from a caller, before doing anything with
-`claim_id` as a lookup or grouping key. Do not reimplement this logic — import the same
-two functions from `jarvis.answer` every time.
-
-**Mandatory checklist item for any future work on this codebase**: if a change introduces a
-new function that constructs, aggregates, ranks, or looks up claims (or objects derived
-from claims, like `Conflict`) by an id, explicitly verify `_dedupe_claim_ids` is applied
-before that id is used as a lookup/grouping key. Do not wait for a review to find this by
-accident a fourth time — check it directly, the way a pre-flight scan checks every other
-interface assumption. There is no more plan-execution work left where this would come up
-as a task-by-task discipline, but it applies equally to any future ad hoc change.
+**Restated for whoever reads this next**: if a change introduces a new function that
+constructs, aggregates, ranks, or looks up claims (or objects derived from claims) by an
+id, explicitly verify `jarvis.answer._dedupe_claim_ids` is applied before that id is used
+as a lookup/grouping key. Do not rely on a review to catch it by accident a fifth time —
+check it directly, the way a pre-flight scan checks every other interface assumption.
 
 ## What is built
 
-Spec §13 lists ten build steps. **All ten are done, all on `main`.**
+All ten of the original design spec's build steps, plus the CLI operator surface over all
+of them (unmerged).
 
-| Step | Status | Modules |
+| Component | Status | Modules |
 |---|---|---|
-| 1. Storage + data model | done, `main` | `models.py`, `store.py` |
-| 2. Parse + typed units | done, `main` | `parse.py`, `units.py`, `context.py`, `text.py` |
-| 3. Retrieval | done, `main`, caveats below | `index.py`, `embed.py`, `retrieve.py` |
-| 4. Verification | done, `main`, caveat below | `verify.py` |
-| 5. Eval harness | done, `main` | `evaluate.py` |
-| 6. Gather + gate | done, `main` | `gather.py`, `gate.py`, `label.py`, `ingest.py`, `card.py` |
-| 7. Compile — cited Q&A | done, `main` | `evidence.py`, `retriever.py`, `writer.py`, `answer.py` |
-| 8. MCP server | done, `main` | `tools.py`, `mcp_server.py` |
-| 9. Contradiction detection | done, `main` | `contradict.py` + extensions to `store.py`/`evaluate.py` |
-| 10. Long-form reports | done, `main` | `outline.py`, `report.py` |
+| Spec build steps 1-10 | done, `main` | see prior handoff versions / `LEDGER*.md` files on `main` |
+| CLI (spec `2026-08-15-cli-and-operations.md`) | **done, `cli-and-operations`, unmerged** | `cli.py`, `fetch.py` |
 
-Caveats carried forward, still true:
+## The CLI's adversarial review — worth reading in full before touching cli.py or fetch.py
 
-- **`jarvis.verify.quote_is_grounded`'s paper-level fallback** (pre-existing since the
-  single-paper-core plan) lets a quote that exists only in a *different* unit of the same
-  paper still ground a claim citing the *wrong* unit. Inherited as-is by every downstream
-  consumer (`verify_quote` MCP tool, `draft_section`, `scan_claim`). Still a real follow-up
-  against `verify.py` itself; still not bundled into any branch.
-- **`sqlite-vec`** was deliberately replaced with brute-force numpy cosine (step 3).
-- **Reranker: local vs hosted** — still unmeasured.
+`LEDGER-cli.md` has the complete record. The final whole-branch review checked the
+claim-id-collision pattern a fourth time (not found — see above) and found 0 Critical, 2
+Important, 2 Minor findings, all independently reproduced live:
 
-## The contradiction-detection adversarial review — worth reading in full before touching contradict.py
+- **Important, fixed**: `_require_chat_credentials` accepted whitespace-only
+  `JARVIS_BASE_URL`/`JARVIS_API_KEY` (Python truthiness on a bare `if not`) — a realistic
+  shell copy-paste artifact that would silently degrade to "looks like an empty corpus"
+  instead of failing loud. Fixed by stripping before checking.
+- **Important, fixed**: `--project` flowed unsanitized into `Config.load().project_dir(name)`
+  — `--project ../../../etc` or an absolute path resolved entirely outside
+  `$JARVIS_PROJECT_ROOT`. Fixed by requiring the resolved candidate be the project root
+  itself or a descendant of it. `--db` remains an explicit, unsanitized override by
+  design — this only affected `--project`'s name-based resolution.
+- **Minor, no fix needed (verified directly)**: a partially-broken optional extra (e.g. a
+  sub-dependency of `sentence-transformers` failing at actual model-load time, not at the
+  top-level import `_require_importable` checks) still produces a named error and exit 1
+  via `main()`'s own outer exception handler — never a bare traceback.
+- **Minor, no fix needed (verified directly)**: the id-reconstruction trick shared by
+  `_resumable_candidates`/`_screened_candidates` (`arxiv_id or paper.paper_id`) only
+  theoretically collides in a contrived scenario; the realistic case (a paper genuinely
+  lacking both real id fields) does not collide.
+- **Explicitly confirmed clean, not just unchecked**: the `--yes` confirmation gate cannot
+  be bypassed via resumption (ran `gather` twice without `--yes` on the same project,
+  confirmed `deep` depth stayed empty after both runs); cost logging fires correctly under
+  every tested failure mode including a mid-run crash before any real cost was logged;
+  `jarvis/fetch.py`'s path sanitizer correctly confines 9 adversarial `paper_id` values;
+  `main()`'s early `mcp` interception doesn't break `--help` for either `jarvis` or
+  `jarvis mcp`.
 
-`LEDGER-contradiction-detection.md` has the complete record. The final whole-branch review
-was deliberately framed around this repo's own history of the claim-id-collision defect,
-and found it a third time (see above), plus two Important robustness gaps: `read_reviews`
-crashed on a single non-UTF-8 byte anywhere in a hand-edited review file, losing every
-other genuinely valid review in that file to one uncaught `UnicodeDecodeError`; and
-`scan_corpus`'s per-claim exception handling gave zero signal when a systemic failure (a
-broken NLI model, not a data problem) made every claim fail — indistinguishable from a
-genuinely clean corpus. Both fixed; the second one also added logging to
-`contradict.py`, which previously had none.
+## There are no remaining implementation plans
 
-One Minor finding fixed (a multi-line evidence quote could visually forge a fake queue
-entry in `render_conflicts`'s output). Two Minor findings parked with documented reasoning:
-`save_contradictions` never removes a stale row for a candidate a rescan no longer
-produces; `report()`'s `{}`-vs-`None` handling for `contradiction_reviews` matches the
-plan's own locked-in test.
-
-**The plan's own stated success criterion — contradiction precision on the first real
-corpus, target ≥0.70 (ContraCrow parity) — is not yet measured.** No real
-(non-test-fixture) gathered corpus exists anywhere on this machine. This is the single
-most important open question the whole spec build leaves behind, and it requires a real
-corpus plus real human review time to answer — no amount of further code closes it.
-
-## There are no remaining implementation plans (but there is a new spec)
-
-All ten of the *original* design spec's build steps have a complete implementation,
-merged, pushed, and independently verified. `docs/specs/2026-08-15-cli-and-operations.md`
-defines the next body of work and has **no implementation plan yet** — writing one is the
-first task for whoever picks this up.
-
-| # | Plan | Spec step | Tasks | Status |
-|---|---|---|---|---|
-| 1 | `2026-08-14-gather-and-gate.md` | 6 | 13 | done, merged, pushed |
-| 2 | `2026-08-14-compile-cited-qa.md` | 7 | 6 | done, merged, pushed |
-| 3 | `2026-08-14-mcp-server.md` | 8 | 5 | done, merged, pushed |
-| 4 | `2026-08-14-longform-reports.md` | 10 | 6 | done, merged, pushed |
-| 5 | `2026-08-14-contradiction-detection.md` | 9 | 5 | done, merged, pushed |
+Both the original ten-step design spec and the CLI spec have complete implementations.
+Nothing else is currently planned. What comes next is the measurement work the whole
+build order has been blocked on — see below.
 
 ## What comes next — READ THIS FIRST IF YOU ARE PICKING THIS UP
 
-Nothing in `docs/specs/2026-08-11-research-corpus-agent-design.md`'s build order (§13)
-remains unbuilt. **But the system cannot be run**, and that is now the top priority.
-
-**There is a new spec for the next body of work:
-[`docs/specs/2026-08-15-cli-and-operations.md`](docs/specs/2026-08-15-cli-and-operations.md).**
-Read it before doing anything else. It is a design spec, not an implementation plan — the
-plan still needs writing (see "How to execute a plan" below, and
-`superpowers:writing-plans`).
-
-The short version of why it exists: `pyproject.toml` declares exactly one entry point,
-`jarvis-mcp`, and it is deliberately read-only. Every pipeline stage exists as a library
-function; nothing wires them together. **No corpus has ever been built** —
-`~/.jarvis/projects` does not exist on this machine, so `jarvis-mcp` has no `--db` to
-point at. Every remaining open question (contradiction precision vs. the 70% target, gate
-calibration transfer, reranker choice, cost per project) is blocked behind that.
-
-**Three real pipeline gaps were found by reading the code while writing that spec** — none
-of them appear in any plan or ledger, and each blocks a real run:
-
-1. **No PDF acquisition step exists.** `ingest_decided`'s default `path_for` resolves to
-   `paper["pdf_url"]` — a URL — and hands it to `DoclingParser.parse`, which passes it to
-   `DocumentConverter().convert(path)`. Nothing downloads, caches, or retries. Whether
-   Docling resolves a remote URL is *unverified* — every test uses `FakeParser`.
-2. **Card extraction is never called outside tests.** `extract_and_verify` is exported and
-   tested but wired into no production path, while `write_report` builds its outline from
-   `corpus_cards(conn)`. On a real gathered corpus, every report would come out empty, and
-   it would look like a report bug.
-3. **Nothing writes `runs.cost_usd`.** `save_run` accepts it, `ModelRouter` tracks it, no
-   code connects them.
-
-Recommended order, per that spec's §10: project resolution + `jarvis status` → PDF fetch
-and cache → `jarvis gather` (with the confirmation gate, card extraction, and cost
-logging) → `ask`/`report` → `contradictions`/`review` → `calibrate`. The first three
-unblock everything; the rest are thin wrappers over merged, reviewed code.
-
-**Two decisions were made without a ruling** and are documented in that spec's §4 — one
-`jarvis` command with subcommands, and `gather` pausing for confirmation before deep reads.
-Both are cheap to overrule before implementation starts; neither should be discovered
-silently mid-build.
-
-**Deliberately sequenced *after* the first real gather, not before:** HTTP/SSE MCP
-transport (worthwhile, but it would serve a corpus that doesn't exist), and any web UI
-(the design spec §3 rules it out for v1 — "CLI and MCP only", "no server").
-
-After that, the measurement work the whole build order has been blocked on: run a real
-gather, then measure contradiction precision against the 70% target. Expect the first live
-run to be a debugging exercise rather than a measurement — every `LLM*` class has only
-ever run against fakes.
-
-## The full CLI task list — everything the spec needs, in one pass
-
-Enough detail to execute without writing a separate plan document first. Every signature
-below was read from the actual source, not recalled. All eight tasks are on one branch;
-they are ordered by dependency, and tasks 1–4 are the ones that unblock everything.
-
-**Global constraints, binding on every task:**
-- Every test offline — no network, no API keys, no model downloads. Every external
-  boundary behind a `typing.Protocol` with a deterministic `Fake*`, matching the existing
-  `Writer`/`NLIModel`/`Embedder`/`Parser` pattern.
-- Heavy dependencies (`docling`, `httpx`, `transformers`, `openai`) imported *inside* the
-  function that needs them, never at module scope — this is why 569 tests run offline.
-- `ruff check .` must stay at exactly 11 violations (the pre-existing baseline).
-- **No new retrieval, verification, or synthesis logic.** This is an operator surface over
-  merged, reviewed functions plus three specific gap-closers. Anything else is scope creep.
-- If a task adds a function that aggregates or looks up claims by id, apply
-  `jarvis.answer._dedupe_claim_ids` first — see the claim-id-collision section above.
-
-### Task 1 — Project resolution, store lifecycle, `jarvis status`
-
-New `jarvis/cli.py` with an argparse subcommand dispatcher; add `jarvis = "jarvis.cli:main"`
-to `[project.scripts]` (leave `jarvis-mcp` untouched — it ships already).
-
-Shared plumbing every later subcommand uses: resolve `--project <name>` through
-`Config.load().project_dir(name) / "corpus.db"`, creating parents; `--db` overrides it
-explicitly. Open with `open_store`, always `close_store` in a `finally`.
-
-`jarvis status` reports, per `DEPTHS = ("deep", "pending_deep", "metadata", "abstract")`,
-the count from `get_papers_by_depth(conn, depth)`, total units, and the latest `runs` row
-with its `cost_usd`. Requires no model of any kind.
-
-*Tests:* status on a nonexistent project is a clean named error, not a traceback; counts
-are correct against a seeded store; the store is closed even when a subcommand raises.
-
-### Task 2 — Model construction and the fail-loud contract
-
-A single helper that builds what a subcommand declares it needs: `ModelRouter(overrides=
-config.model_overrides)`, `BGEEmbedder()`, `HFNLI()`, `LLMWriter(router)`,
-`DoclingParser()`, `LLMPlanner`/`LLMVoter`/`LLMCardExtractor`/`LLMOutliner`.
-
-**A missing `JARVIS_BASE_URL`/`JARVIS_API_KEY`/`UNPAYWALL_EMAIL`, or a missing optional
-extra, must fail immediately naming the exact variable or extra.** Never substitute a
-`Fake*` in an operator tool — a corpus built with a fake model looks real and is not,
-which is the precise failure this whole system exists to prevent.
-
-*Tests:* each missing variable produces an error naming it; no code path reaches a `Fake*`
-when a real model was requested.
-
-### Task 3 — PDF fetch and cache (closes spec gap §5.1)
-
-New `jarvis/fetch.py`. `fetch_pdf(paper: dict, cache_dir: Path, *, unpaywall_email: str)
--> str | None` returns a local path or `None`. Never raises.
-
-- Cache at `<project_dir>/pdfs/<paper_id>.pdf`; a cache hit skips the network entirely.
-- Source order: `paper["pdf_url"]`, then `paper["url"]`, then Unpaywall by DOI (the
-  Unpaywall adapter already exists in `sources.py`).
-- **Verify the bytes are a PDF** (`%PDF` magic / content-type). A paywall's HTML login
-  page saved as `.pdf` is a fetch failure that would otherwise reach Docling and produce
-  a garbage "successful" parse.
-- Timeouts and one retry; a failure is per-paper data, never a run-ender.
-
-*Tests:* cache hit performs no request; an HTML response is rejected; a failed fetch
-returns `None`; `paper_id` is sanitized so it cannot escape the cache directory.
-
-*First, empirically:* does `DoclingParser` accept a URL directly? Spec §12 open question 1.
-The answer doesn't remove the need for this task (re-parse without re-fetch, parser
-escalation, a meaningful `papers.source_path`) but it does change the failure mode.
-
-### Task 4 — `jarvis gather` (closes spec gaps §5.2 and §5.3)
-
-The one substantial task. Wires stages A–C end to end:
-
-```
-planner (LLMPlanner | TemplatePlanner)
-  -> combine_sources(make_arxiv_search(...), make_s2_search(...),
-                     make_openalex_search(..., mailto=...), make_crossref_search(...))
-  -> gather(question, planner, search_fn, neighbors=..., score_fn=..., budget=...)
-  -> save_candidates(conn, candidates)
-  -> screen(conn, candidates, question, embedder, voter=..., run_id=...)
-  -> [CONFIRMATION GATE — print decision counts, stop unless --yes]
-  -> fetch_pdf per kept candidate  (Task 3)
-  -> ingest_decided(conn, decisions, candidates, parser, embedder,
-                    path_for=<cached local path>)
-  -> extract_and_verify(conn, paper, extractor) per successfully-ingested paper
-```
-
-Three things this task must get right beyond the wiring:
-
-1. **Card extraction** (`extract_and_verify(conn, paper, extractor) -> Card`) runs after
-   ingest, with its own per-paper failure isolation. Without it `corpus_cards(conn)` stays
-   empty and every report comes out blank.
-2. **Cost**: one `ModelRouter` owned for the whole run; write
-   `save_run(conn, run_id, question, started_at, cost_usd=router.cost.total_cost)` in a
-   `finally` — a cost number that only appears on success is not a cost control.
-   (`total_cost` is a property on `CostTracker`.)
-3. **Resumability**: re-running `gather` on an existing project picks up `pending_deep`
-   papers rather than re-searching. The depth transitions already encode progress.
-
-Flags: `--yes`, `--budget` (into `gather()`'s existing `budget`), `--limit`, `--sources`.
-Report counts at every stage — zero papers fetched, zero units indexed, and zero cards
-extracted are all valid outputs and all suspicious.
-
-*Tests:* the gate blocks without `--yes`; cost is written even when the run fails midway;
-resumption doesn't re-search; one unfetchable PDF and one unparseable PDF each cost exactly
-one paper; a run that ingests nothing says so rather than reporting success.
-
-### Task 5 — `jarvis ask` and `jarvis report`
-
-`ask(conn, question, embedder, writer, nli, limit=..., rounds=...)` → `render_answer`.
-`write_report(conn, topic, outliner, ...)` → `render_report`, plus `evaluate_report(report)`
-for the coverage/citation numbers. `--out` writes markdown to a file.
-
-**`report` must fail with a named error when `corpus_cards(conn)` is empty** rather than
-emitting an empty report — otherwise the §5.2 gap resurfaces as a mystery report bug.
-
-*Tests:* an empty-card corpus produces the named error; a question with no supporting
-evidence renders the honest "no evidence" answer rather than an empty success.
-
-### Task 6 — `jarvis contradictions` and `jarvis review`
-
-`scan_corpus(conn, claims, nli, embedder, run_id=..., budget=...)` → `rank` →
-`write_review_sheet(path, conflicts)` and `render_conflicts(conflicts, top_n=20)`.
-
-Claims come from the most recent report, or `--from-report <path>` (spec §9 — the spec's
-least-confident decision; the first real corpus should inform it). Scanning with no report
-available is a named error, not an empty result.
-
-`jarvis review <sheet>`: `read_reviews(path)` → `apply_reviews(conn, reviews)` →
-`contradiction_precision(reviews)`, printed against the 0.70 target. **This is the command
-that finally produces the number the entire build order has been blocked on.**
-
-*Tests:* no-report is a named error; precision is computed over reviewed candidates only
-(an unreviewed candidate is an unanswered question, not a failure — `evaluate.py` documents
-this explicitly); a partially-reviewed sheet reports progress rather than a wrong number.
-
-### Task 7 — `jarvis calibrate`
-
-`sample_seed(candidates, size=...)` → `write_label_sheet(path, candidates)` → human edits →
-`read_labels(path)` → `calibrate(signal_rows, labels)` → `calibration_report(...)`.
-`label_progress(path)` reports partial completion.
-
-This is the gate's ≥95% recall target (design spec §7B) and answers open question 3, gate
-calibration transfer, by scoring one project's thresholds against another's labels.
-
-### Task 8 — `jarvis mcp` alias, README, and a real quickstart
-
-`jarvis mcp` delegates to `mcp_server.main`; `jarvis-mcp` keeps working unchanged for
-existing client configs. Update `README.md` with an actual quickstart — install, env vars,
-`jarvis gather`, `jarvis ask` — replacing the current state where the only documented
-entry point serves a corpus no documented command can create.
-
-### After the eight tasks
-
-Final whole-branch adversarial review, fix wave, independent re-review, ledger
-(`LEDGER-cli.md`), handoff update — the same process every branch has used. Then the first
-real gather run, which is a debugging exercise, not a measurement.
+1. **Merge `cli-and-operations` to `main`**, with explicit go-ahead (see "How to execute
+   a plan" below — the rule applies exactly as it always has, regardless of how many
+   prior branches merged cleanly).
+2. **Run a real gather on a real research question.** This is the system's first live
+   run of any kind. Every `LLM*` class (`LLMPlanner`, `LLMVoter`, `LLMCardExtractor`,
+   `LLMRefiner`, `LLMWriter`, `LLMOutliner`), `BGEEmbedder`, `HFNLI`, and `DoclingParser`
+   has only ever been exercised against fakes or type signatures. Expect this to be a
+   debugging exercise, not a measurement (the CLI spec's own risk table says so
+   explicitly). Start with a small `--budget` and `--limit`.
+3. **Once a real corpus exists, measure contradiction precision against the 0.70 target**
+   (`jarvis contradictions` then `jarvis review` then read the printed number) — the one
+   metric the entire spec build order has never been able to produce without a real
+   corpus. This is the single most important open question left in this whole project.
+4. **Work through the Loose ends list below** — none of it is spec-build or CLI-build
+   work, all of it is real, and some of it may become more urgent once a real corpus
+   exists (e.g. `jarvis.verify.quote_is_grounded`'s paper-level fallback).
 
 ## How to execute a plan (kept for reference — none currently exist)
 
@@ -380,25 +157,39 @@ real gather run, which is a debugging exercise, not a measurement.
 3. Per task: implement directly or dispatch a subagent implementer. **Before writing the
    final review prompt, explicitly check the claim-id-collision pattern above if the
    change touches claims at all** — do not rely on the review to catch it by accident a
-   fourth time.
+   fifth time.
 4. After the last task: one whole-branch adversarial review, ideally dispatched to a
    subagent for a genuinely independent pass — every branch so far has found at least one
-   real issue this way.
-5. **After any fix wave, get an independent re-review of the fix itself.** For a
-   Critical-severity fix, genuinely dispatch a subagent and have it mutation-test (revert
-   the fix, confirm the regression test actually fails, restore) — this has now been done
-   three times for the same defect class and caught it cleanly every time.
+   real issue this way (the CLI branch found 2 Important, its first time finding zero
+   Critical).
+5. **After any fix wave, get an independent re-review of the fix itself.** Mandatory for
+   any Critical-severity fix — genuinely dispatch a subagent and have it mutation-test
+   (revert the fix, confirm the regression test actually fails, restore). For
+   Important-severity fixes touching security-relevant surface but with no Critical
+   finding on the branch, a rigorous self-mutation-test is an acceptable substitute (used
+   on the CLI branch) — the key requirement either way is proving the fix by reverting it
+   and watching the test fail, not just re-reading the diff.
 6. **Merge to `main` and push only with explicit go-ahead, asked for in chat, every time —
    no exceptions.** When the human does confirm, run the full test suite again on `main`
    itself after the merge (not just on the branch) before pushing.
 
-## Patterns worth keeping — reconfirmed across six branches now
+## Patterns worth keeping — reconfirmed across seven branches now
 
-- **The claim-id-collision pattern above is now the single most important pattern in this
-  document.** Everything else below is secondary to it for any future work touching claims.
+- **The claim-id-collision pattern above is still the single most important pattern in
+  this document** — four checks now, three real Critical findings, one clean pass.
 
 - **Pre-flight scan before every task.** Read the task's actual dependency signatures
-  against the plan's assumptions before writing anything.
+  against the plan's/spec's assumptions before writing anything. On the CLI branch this
+  caught a real bug the pre-flight scan itself didn't catch (only building and testing
+  did) — `citation_graph.paper_id()`'s arxiv-first precedence silently breaking a resumed
+  candidate's id reconstruction. Pre-flight scans check signatures match; they do not
+  substitute for actually running the code end to end.
+
+- **Verify a spec's own claimed empirical answer before building around it, if it's
+  cheap to check.** The CLI spec's open question 1 ("does Docling accept a URL directly?")
+  was answered via a web search citing Docling's own published examples before writing
+  `jarvis/fetch.py` — cheap, fast, and avoided building a fetch step on a wrong assumption
+  about why it was needed.
 
 - **Fix-loop governance — three categories, unchanged:**
 
@@ -408,44 +199,45 @@ real gather run, which is a debugging exercise, not a measurement.
   | An **implementer deviating** from otherwise-correct plan code | No arbitration. Resume with the finding. |
   | A **packaging / config / robustness gap the plan never covered** | Fix directly. No arbitration. |
 
-- **A test's own reference numbers can be wrong even when the code under test is right.**
-  `contradiction-detection`'s Task 4 caught a genuine arithmetic error in the plan's own
-  test data (2/3 ≈ 0.667 does not clear a 0.70 target the test claimed to demonstrate
-  meeting) — verified independently before fixing the test, not the metric function, which
-  was correct.
+  The CLI spec was detailed enough (a full task-by-task build order embedded directly in
+  `handoff.md`, not a separate plan document) that no plan-conflict findings occurred at
+  all this time — every finding was category 3.
 
-- **`FakeEmbedder` has no relevance floor** — five confirmed occurrences across three
-  branches now. Any test asserting "a nonsense query returns zero hits" against a
-  *nonempty* store will fail this way; use a genuinely empty store instead.
+- **Not every review finding is actually a defect — verify before fixing.** Reconfirmed
+  twice on the CLI branch: a partially-broken extra failing at lazy-load time (not the
+  `_require_importable` check time) is already caught by `main()`'s own outer exception
+  handler; the id-reconstruction trick's theoretical collision doesn't occur in the
+  realistic case. Both verified live, not assumed, before being left unfixed.
 
-- **Not every review finding is actually a defect — verify before fixing.**
-  `mcp-server`'s Finding 1 (`"abstract"` as a phantom depth value) looked real until
-  `store.py`'s own schema comment was checked directly, which showed it documented as part
-  of the depth vocabulary all along.
+- **A "fail-loud" check needs to check the *intent*, not just the literal condition
+  described.** `_require_chat_credentials`'s bug wasn't that it forgot to check something
+  — it checked exactly what its own docstring said (non-empty strings) and still let a
+  realistic misconfiguration through, because "non-empty" and "actually usable" are
+  different properties. When writing or reviewing a fail-loud guard, ask what the guard is
+  *actually protecting against*, not just whether the literal check as written passes.
 
-- **A "silent except" is a red flag on any function that scans/iterates over many items.**
-  `contradiction-detection`'s `scan_corpus` masked a systemic failure identically to a
-  clean result until a warning log was added.
-
-- **A single `read_text(encoding="utf-8")` on a whole file is a single point of failure**
-  for any format meant to tolerate partial corruption (JSONL, line-oriented formats in
-  general). Decode per line if the contract is "one bad line doesn't take down the rest."
+- **A shell's own console encoding can silently swallow ALL output of a command**, not
+  just mis-render one character — an em-dash (`—`, U+2014) in a scratch verification
+  script's `print()` output caused this session's shell to return exit code 0 with zero
+  stdout, indistinguishable at first glance from "the code hung" or "the code crashed
+  silently." If a verification script inexplicably produces no output at all despite a
+  clean exit code, suspect the shell's rendering of a non-ASCII character before
+  suspecting the code under test — confirmed by rewriting the same script in pure ASCII
+  and getting the expected output immediately.
 
 - Run ruff against both modified and new test files, every task. Never dispatch two
   implementer subagents in parallel. Every external model behind a `typing.Protocol` with
   a deterministic `Fake*`, every heavy dependency imported inside the function that needs
-  it.
+  it — the CLI's own `build_*` helpers in `cli.py` follow this exactly, mirroring the
+  pattern from every module they wrap.
 
 ## Gotchas
 
 - **A branch can land on `main` and get pushed without the usual confirmation checkpoint**
-  — it happened on `mcp-server`, `longform-reports`, and `contradiction-detection`: in each
-  case a "not yet merged, pending explicit go-ahead" note in the branch's own ledger was
-  followed within minutes by the merge commit itself, with no visible confirmation step in
-  between in git history. Every merge landed on `main` clean and tested regardless, and
-  none has needed to be unwound — but if you are a session picking this up, do not treat
-  the pattern as license to do the same. Ask before merging or pushing, every time,
-  regardless of what a prior session did.
+  — happened on `mcp-server`, `longform-reports`, and `contradiction-detection`. Every
+  merge landed clean and tested regardless, and none has needed to be unwound — but do
+  not treat the pattern as license to do the same. Ask before merging or pushing, every
+  time, regardless of what a prior session did.
 
 - **`EnterWorktree` (the native tool) is pinned to the wrong repo in this environment** — it
   creates worktrees of NanoResearch, not this standalone `jarvis` repo. Use
@@ -454,6 +246,11 @@ real gather run, which is a debugging exercise, not a measurement.
 - **Agent-tool `isolation: "worktree"` has the same problem** when the dispatch already
   carries an explicit absolute working directory — it isolates *this session's own* repo,
   not the target repo. Omit it for dispatches that already specify a working directory.
+
+- **Subagent dispatches over the network can fail transiently** (`DispatchFailure`,
+  connection reset) with no code-level cause — happened twice in a row on the CLI branch's
+  final review before a third attempt with a condensed prompt succeeded. Retry with the
+  same or a shortened prompt before assuming something is broken.
 
 - **There is a completely unrelated repo at
   `D:\LionXdrones\r&d\AiFlightLogAnalyser\NanoResearch\jarvis`** — own GitHub remote, own
@@ -466,53 +263,72 @@ real gather run, which is a debugging exercise, not a measurement.
 
 - **The ruff baseline is 11**, in `citation_graph.py` (2), `config.py` (1), `scoring.py`
   (1), `sources.py` (6), `test_ported.py` (1) — all ported from NanoResearch. Confirmed
-  unchanged through six full plans now.
+  unchanged through seven full branches now, including the CLI's addition of two new
+  source files (`cli.py`, `fetch.py`) with zero new violations.
 
 - **A subagent reviewer's stated test count can be wrong even when its qualitative
   findings are right.** Always re-run the count yourself via junit-xml rather than quoting
   a reviewer's number verbatim.
 
+- **`jarvis calibrate`'s nested subparser requires `--project`/`--db` BEFORE the
+  `seed`/`fit`/`progress` token**, not after (`jarvis calibrate --project x seed ...`, not
+  `jarvis calibrate seed --project x ...`). Found and fixed in the README's own Quickstart
+  before committing — every example command in a README should be checked against the
+  real argparse tree, not assumed correct by inspection.
+
 ## Loose ends
 
-- **The system has no operator surface — nothing can be run.** Now covered by
-  `docs/specs/2026-08-15-cli-and-operations.md`; see "What comes next" above. Includes
-  three previously-unrecorded pipeline gaps (no PDF acquisition, card extraction never
-  called outside tests, nothing writes `runs.cost_usd`).
-- **The one number this entire spec build order has never been able to produce: measured
-  contradiction precision on a real corpus.** See "The contradiction-detection adversarial
-  review" above. No amount of further code closes this — it needs a real gather run and
-  real human review time, both blocked on the CLI above.
+- **The system has never been run against a real corpus.** This is now the single most
+  important remaining item — see "What comes next" above. No amount of further code
+  closes this; it needs a real gather run.
+- **The one number this entire project has never been able to produce: measured
+  contradiction precision on a real corpus.** Blocked on the above.
 - **`jarvis/retriever.py`'s RRF cross-round fix has no real regression test** — still open.
 - **`main` has a public remote and is being pushed to.** Flag any future push as the
-  outbound, semi-irreversible action it is — see the Gotchas entry about confirmation.
-- **One spec §10 metric is unclaimed: cost per project.** `router.py`'s
-  `CostTracker`/`ModelRouter` and the `runs.cost_usd` column both exist; nothing writes
-  measured usage into a run.
+  outbound, semi-irreversible action it is.
+- **One spec §10 metric was unclaimed for a long time and is now claimed but unmeasured**:
+  cost per project. `cmd_gather` now writes `runs.cost_usd` on every run, but no real run
+  has happened yet to produce a real number.
 - **`jarvis.verify.quote_is_grounded`'s paper-level fallback** — real, pre-existing gap,
-  inherited as-is by every downstream consumer. Worth a dedicated small follow-up against
-  `verify.py` directly.
+  inherited as-is by every downstream consumer (`verify_quote` MCP tool, `draft_section`,
+  `scan_claim`, and now every CLI command that touches verification). Worth a dedicated
+  small follow-up against `verify.py` directly, and worth checking again once a real
+  corpus exists to see how often it actually matters in practice.
 - **`list_papers`'s N+1 query pattern and missing total/has_more fields** and
   **`save_contradictions`' UPSERT-only staleness** — both real, both low-frequency, both
   parked with documented reasoning in their respective ledgers.
-- **`FakeEmbedder`'s missing relevance floor** — five occurrences now. Worth adding an
-  opt-in floor to the fixture directly if a future branch hits it again.
-- **`LLMPlanner`, `LLMVoter`, `LLMCardExtractor`, `LLMRefiner`, `LLMWriter`, `LLMOutliner`,
-  and the `--with-models` path of `jarvis/mcp_server.py` are tested against
-  fakes/type-signatures only** — none has been exercised against a real model endpoint.
-  Deliberate deferral, not a gap, but worth knowing before the "run a real gather" step
-  above.
+- **`FakeEmbedder`'s missing relevance floor** — five occurrences across branches. Worth
+  adding an opt-in floor to the fixture directly if a future branch hits it again.
+- **Every `LLM*` class, `BGEEmbedder`, `HFNLI`, `DoclingParser`, and the `--with-models`
+  path of `jarvis/mcp_server.py` are tested against fakes/type-signatures only** — none
+  has been exercised against a real model endpoint or a real PDF, on this branch or any
+  before it. The CLI's own fail-loud contract (this branch's whole reason for existing)
+  is itself untested against a real, reachable, correctly-authenticated endpoint — only
+  against the absence of credentials/extras. This is the most direct path to closing this
+  loose end: run `jarvis gather` for real.
 - **This file is tracked on `main`**. Every `LEDGER-*.md` remains the authoritative
   per-branch record; this file is the cross-branch orientation layer.
 
 ## Open questions the spec asks and the code has not yet answered
 
-Spec §15, still open:
+Design spec §15 and CLI spec §12, still open:
 
 1. **Which NLI model.** `HFNLI` defaults to `DeBERTa-v3-base-mnli-fever-anli`, unchanged.
 2. **VLM descriptions for figures.** Still caption + referring text only, unmeasured.
 3. **Gate calibration transfer.** `calibration_report` can score one project's thresholds
    against another project's labels directly — nobody has run this comparison yet.
 4. **Reranker: local vs hosted.** Still unmeasured.
-5. **Contradiction detection precision on a real corpus.** The newest open question, and
-   now the most important one, since it's the last piece of the spec's own build order
-   that genuinely cannot be answered without real-world data.
+5. **Contradiction detection precision on a real corpus.** Still the most important open
+   question — blocked on the first real gather.
+6. **Does Docling accept a URL directly?** Answered empirically during the CLI build
+   (yes — confirmed via Docling's own published examples) — kept here since it was a
+   named open question, now resolved.
+7. **What is the real fetch success rate on a typical 100-300 candidate gather?** Still
+   unknown; needs a real run.
+8. **Should card extraction be per-paper at ingest, or a batch pass afterward?** Built
+   per-paper (inside `cmd_gather`, immediately after each paper's successful ingest) —
+   this is now the actual answer in code, not just an open question, though its tradeoffs
+   against a batch pass haven't been measured against a real corpus yet.
+9. **§9's claim-source decision for corpus-wide contradiction scanning.** Built as "the
+   most recent report's claims sidecar, or an explicit `--from-report` path" — the spec's
+   own least-confident decision, worth revisiting once a real report exists.
