@@ -16,14 +16,16 @@ same thing cannot disagree, so retrieval loses nothing real.
 """
 from __future__ import annotations
 
+import json
 import sqlite3
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 
 from jarvis.embed import Embedder
 from jarvis.models import Claim, Unit
 from jarvis.retrieve import Reranker, search
-from jarvis.store import get_unit, save_contradictions
+from jarvis.store import get_unit, save_contradictions, set_contradiction_review
 from jarvis.verify import NLIModel, find_contradictions
 
 
@@ -138,3 +140,86 @@ def scan_corpus(conn: sqlite3.Connection, claims: Sequence[Claim], nli: NLIModel
             run_id=run_id,
         )
     return ranked
+
+
+_TRUE = {"true", "valid", "yes", "y", "1"}
+_FALSE = {"false", "invalid", "no", "n", "0"}
+
+
+def write_review_sheet(path: str | Path, conflicts: Sequence[Conflict]) -> int:
+    """Write candidates as JSONL for a human to adjudicate. Returns rows written."""
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    lines = [
+        json.dumps({
+            "claim_id": c.claim_id, "claim_text": c.claim_text,
+            "claim_paper_id": c.claim_paper_id, "unit_id": c.unit_id,
+            "paper_id": c.paper_id, "score": round(c.score, 4), "evidence": c.evidence,
+            "verdict": None,
+        }, ensure_ascii=False)
+        for c in conflicts
+    ]
+    target.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+    return len(lines)
+
+
+def _as_bool(value) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    if text in _TRUE:
+        return True
+    if text in _FALSE:
+        return False
+    return None
+
+
+def read_reviews(path: str | Path) -> dict[tuple[str, str], bool]:
+    """Read adjudicated verdicts. Unreviewed and unparseable rows are absent, not False."""
+    target = Path(path)
+    if not target.is_file():
+        return {}
+    out: dict[tuple[str, str], bool] = {}
+    for line in target.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(row, dict) or not row.get("claim_id") or not row.get("unit_id"):
+            continue
+        verdict = _as_bool(row.get("verdict"))
+        if verdict is not None:
+            out[(str(row["claim_id"]), str(row["unit_id"]))] = verdict
+    return out
+
+
+def apply_reviews(conn: sqlite3.Connection, reviews: Mapping[tuple[str, str], bool],
+                  run_id: str = "") -> int:
+    """Write adjudicated verdicts back into the store. Returns rows updated."""
+    for (claim_id, unit_id), valid in reviews.items():
+        set_contradiction_review(conn, claim_id, unit_id,
+                                 "valid" if valid else "invalid", run_id=run_id)
+    return len(reviews)
+
+
+def render_conflicts(conflicts: Sequence[Conflict], top_n: int = 20) -> str:
+    """Human-readable queue. Every line is a question, never a finding (spec §8)."""
+    ranked = rank(conflicts)[:top_n]
+    if not ranked:
+        return "No contradiction candidates found in this corpus."
+
+    lines = [(f"{len(ranked)} contradiction candidate(s) for review — these are prompts "
+             f"to look, not findings:"), ""]
+    for index, conflict in enumerate(ranked, start=1):
+        lines += [
+            f"{index}. candidate (contradiction score {conflict.score:.2f})",
+            f"   claim  [{conflict.claim_paper_id}]: {conflict.claim_text}",
+            f"   versus [{conflict.paper_id}] {conflict.unit_id}: {conflict.evidence}",
+            "",
+        ]
+    return "\n".join(lines)

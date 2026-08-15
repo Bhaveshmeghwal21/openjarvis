@@ -194,3 +194,118 @@ def test_one_bad_claim_does_not_abort_the_scan(corpus):
 def test_conflict_is_frozen():
     with pytest.raises(FrozenInstanceError):
         Conflict("c1", "t", "p1", "u1", "p2", 0.6, "e").score = 1.0
+
+
+import json
+
+from jarvis.contradict import (
+    apply_reviews,
+    read_reviews,
+    render_conflicts,
+    write_review_sheet,
+)
+from jarvis.evaluate import CONTRADICTION_PRECISION_TARGET, contradiction_precision, report
+from jarvis.store import get_contradiction_reviews
+
+CONFLICTS = [
+    Conflict("c1", "It reaches 94.2%.", "p1", "u9", "p2", 0.91, "never exceeded 61%"),
+    Conflict("c1", "It reaches 94.2%.", "p1", "u8", "p3", 0.72, "we measured 90%"),
+]
+
+
+def test_the_review_sheet_is_one_candidate_per_line_awaiting_a_verdict(tmp_path):
+    path = tmp_path / "review.jsonl"
+    assert write_review_sheet(path, CONFLICTS) == 2
+
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    assert rows[0]["claim_id"] == "c1"
+    assert rows[0]["unit_id"] == "u9"
+    assert rows[0]["verdict"] is None
+    assert "61%" in rows[0]["evidence"]
+    assert rows[0]["claim_text"].startswith("It reaches")
+
+
+def test_a_fresh_sheet_has_no_verdicts(tmp_path):
+    path = tmp_path / "review.jsonl"
+    write_review_sheet(path, CONFLICTS)
+    assert read_reviews(path) == {}
+
+
+def test_verdicts_round_trip(tmp_path):
+    path = tmp_path / "review.jsonl"
+    path.write_text('{"claim_id": "c1", "unit_id": "u9", "verdict": "valid"}\n'
+                    '{"claim_id": "c1", "unit_id": "u8", "verdict": "invalid"}\n'
+                    '{"claim_id": "c1", "unit_id": "u7", "verdict": null}\n',
+                    encoding="utf-8")
+    assert read_reviews(path) == {("c1", "u9"): True, ("c1", "u8"): False}
+
+
+def test_common_hand_typed_verdicts_are_accepted(tmp_path):
+    path = tmp_path / "review.jsonl"
+    path.write_text('{"claim_id": "c1", "unit_id": "a", "verdict": "yes"}\n'
+                    '{"claim_id": "c1", "unit_id": "b", "verdict": "no"}\n'
+                    '{"claim_id": "c1", "unit_id": "c", "verdict": true}\n',
+                    encoding="utf-8")
+    assert read_reviews(path) == {("c1", "a"): True, ("c1", "b"): False, ("c1", "c"): True}
+
+
+def test_a_malformed_review_line_is_skipped(tmp_path):
+    path = tmp_path / "review.jsonl"
+    path.write_text('not json\n{"claim_id": "c1", "unit_id": "a", "verdict": "valid"}\n'
+                    '{"verdict": "valid"}\n', encoding="utf-8")
+    assert read_reviews(path) == {("c1", "a"): True}
+
+
+def test_reviews_can_be_applied_back_into_the_store(corpus, tmp_path):
+    unit = next(u for u in get_units(corpus, "p1") if "94.2" in u.verbatim_text)
+    claims = [Claim("c1", "It reaches 94.2%.", unit.unit_id, "94.2% tracking accuracy")]
+    conflicts = scan_corpus(corpus, claims, CONTRADICTS, FakeEmbedder(), run_id="scan1")
+
+    reviews = {(conflicts[0].claim_id, conflicts[0].unit_id): True}
+    assert apply_reviews(corpus, reviews, run_id="scan1") == 1
+    assert get_contradiction_reviews(corpus, "scan1") == reviews
+
+
+def test_precision_is_measured_over_reviewed_candidates_only():
+    assert contradiction_precision({("c1", "u1"): True, ("c1", "u2"): True,
+                                    ("c1", "u3"): False}) == pytest.approx(2 / 3)
+
+
+def test_precision_with_nothing_reviewed_is_zero():
+    assert contradiction_precision({}) == 0.0
+
+
+def test_the_target_is_contracrow_parity():
+    assert CONTRADICTION_PRECISION_TARGET == 0.70
+
+
+def test_the_report_flags_whether_the_target_is_met():
+    good = report([], contradiction_reviews={("c1", "u1"): True, ("c1", "u2"): True,
+                                             ("c1", "u3"): True, ("c1", "u4"): False})
+    bad = report([], contradiction_reviews={("c1", "u1"): True, ("c1", "u2"): False,
+                                            ("c1", "u3"): False})
+    assert good.meets_contradiction_target is True
+    assert bad.meets_contradiction_target is False
+
+
+def test_the_report_omits_the_metric_when_nothing_was_reviewed():
+    r = report([])
+    assert r.contradiction_precision is None
+    assert r.meets_contradiction_target is None
+
+
+def test_rendering_presents_candidates_as_questions_not_findings():
+    text = render_conflicts(CONFLICTS)
+    lowered = text.lower()
+    assert "candidate" in lowered or "review" in lowered
+    assert "0.91" in text
+    assert "61%" in text
+
+
+def test_rendering_shows_only_the_top_n():
+    many = [Conflict("c1", "t", "p1", f"u{i}", "p2", 0.9 - i / 100, "e") for i in range(50)]
+    assert render_conflicts(many, top_n=5).count("candidate") <= 6
+
+
+def test_rendering_nothing_says_so_plainly():
+    assert "no " in render_conflicts([]).lower()
