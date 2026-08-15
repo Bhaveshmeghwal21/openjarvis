@@ -119,15 +119,22 @@ itself with an opt-in relevance floor if a sixth branch hits it.
 | 4 | `2026-08-14-contradiction-detection.md` | 9 | 5 | not started; *useful* only once a real gathered corpus exists |
 | 5 | `2026-08-14-longform-reports.md` | 10 | 6 | not started; unblocked |
 
-**Recommended next: long-form reports**, then contradiction detection, or either order —
-both are fully unblocked now that `main` carries everything through step 8. Contradiction
-detection is listed second only because it's most useful once a real (not just
-test-fixture) gathered corpus exists to run it over; if a real corpus already exists by the
-time this is read, either order is fine.
+**Recommended next: long-form reports** (`docs/plans/2026-08-14-longform-reports.md`, 6
+tasks), **then contradiction detection** (`docs/plans/2026-08-14-contradiction-detection.md`,
+5 tasks) — both are fully unblocked now that `main` carries everything through step 8.
+Confirmed directly: no gathered corpus exists anywhere on this machine yet (`~/.jarvis/projects`
+doesn't exist), which is exactly why contradiction detection is second — it needs papers
+that actually disagree to be worth running, and the only corpora built so far are small
+test fixtures. Long-form reports has no such dependency and can start immediately. If a
+real corpus exists by the time this is read, either order is fine.
 
-Each plan is self-contained: goal, architecture, global constraints, file structure, and
-per-task TDD steps with the actual code. Hand one to a fresh session and it needs nothing
-else from this document or any conversation history.
+For whichever CLI session picks this up: **start by reading the plan file named above in
+full**, then follow "How to execute a plan" below exactly — worktree first, one task at a
+time, final whole-branch adversarial review before calling it done, and stop for explicit
+confirmation before merging or pushing (see the Gotchas entry about the one branch that
+skipped that). Each plan is self-contained: goal, architecture, global constraints, file
+structure, and per-task TDD steps with the actual code. It needs nothing else from this
+document or any conversation history beyond what's written here.
 
 ## How to execute a plan
 
