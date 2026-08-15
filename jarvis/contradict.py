@@ -17,16 +17,20 @@ same thing cannot disagree, so retrieval loses nothing real.
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from jarvis.answer import _dedupe_claim_ids
 from jarvis.embed import Embedder
 from jarvis.models import Claim, Unit
 from jarvis.retrieve import Reranker, search
 from jarvis.store import get_unit, save_contradictions, set_contradiction_review
 from jarvis.verify import NLIModel, find_contradictions
+
+_LOGGER = logging.getLogger(__name__)
 
 
 def opposing_units(conn: sqlite3.Connection, claim: Claim, embedder: Embedder, *,
@@ -120,16 +124,34 @@ def scan_corpus(conn: sqlite3.Connection, claims: Sequence[Claim], nli: NLIModel
     40 is worth less than one that reports 299 papers' worth of candidates.
 
     Persists only when `run_id` is given, so an exploratory scan costs nothing permanent.
+
+    Applies `jarvis.answer._dedupe_claim_ids` to `claims` first. `rank`'s own dedup key is
+    `(claim_id, unit_id)` — correct only if `claim_id` uniquely identifies one logical
+    claim, which nothing here enforces on its own. Two distinct claims sharing an id (the
+    same untrusted-boundary hazard `ask()` and `draft_section()` both guard against) would
+    otherwise let `rank()` silently keep only one claim's conflict per colliding unit and
+    drop the other's — misattributing which claim a piece of evidence actually contradicts,
+    not merely losing a duplicate.
     """
+    claims = _dedupe_claim_ids(tuple(claims))
     found: list[Conflict] = []
+    failed = 0
     for claim in claims:
         if len(found) >= budget:
             break
         try:
             found += scan_claim(conn, claim, nli, embedder, limit=limit,
                                 threshold=threshold, reranker=reranker)
-        except Exception:  # noqa: BLE001, S112 - one claim's failure is not the scan's
+        except Exception:  # noqa: BLE001 - one claim's failure is not the scan's failure
+            failed += 1
             continue
+
+    if failed:
+        # A systemic failure (broken NLI model, broken embedder) looks identical to a
+        # genuinely clean corpus from the return value alone -- log so an operator running
+        # a large scan can tell "found nothing" apart from "couldn't scan anything".
+        _LOGGER.warning("contradiction scan: %d/%d claim(s) failed to scan and were "
+                        "skipped", failed, len(claims))
 
     ranked = rank(found)[:budget]
     if run_id:
@@ -177,13 +199,22 @@ def _as_bool(value) -> bool | None:
 
 
 def read_reviews(path: str | Path) -> dict[tuple[str, str], bool]:
-    """Read adjudicated verdicts. Unreviewed and unparseable rows are absent, not False."""
+    """Read adjudicated verdicts. Unreviewed and unparseable rows are absent, not False.
+
+    Reads as raw bytes and decodes per line rather than the whole file at once: a single
+    line corrupted by a hand-editing artifact (e.g. a stray non-UTF-8 byte from pasting a
+    smart quote in a text editor) must be skipped like any other malformed line, not lose
+    every other genuinely valid review in the file to one `UnicodeDecodeError`.
+    """
     target = Path(path)
     if not target.is_file():
         return {}
     out: dict[tuple[str, str], bool] = {}
-    for line in target.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
+    for raw_line in target.read_bytes().splitlines():
+        try:
+            line = raw_line.decode("utf-8").strip()
+        except UnicodeDecodeError:
+            continue
         if not line:
             continue
         try:
@@ -216,10 +247,17 @@ def render_conflicts(conflicts: Sequence[Conflict], top_n: int = 20) -> str:
     lines = [(f"{len(ranked)} contradiction candidate(s) for review — these are prompts "
              f"to look, not findings:"), ""]
     for index, conflict in enumerate(ranked, start=1):
+        # Collapse embedded newlines in quoted source text before rendering. A verbatim
+        # quote routinely contains its own line breaks, and this format has no delimiter
+        # marking where a quote ends -- an unrendered newline could otherwise make one
+        # real candidate's evidence visually forge a second, fake candidate entry in a
+        # queue a human is skimming quickly.
+        claim_text = " ".join(conflict.claim_text.split())
+        evidence = " ".join(conflict.evidence.split())
         lines += [
             f"{index}. candidate (contradiction score {conflict.score:.2f})",
-            f"   claim  [{conflict.claim_paper_id}]: {conflict.claim_text}",
-            f"   versus [{conflict.paper_id}] {conflict.unit_id}: {conflict.evidence}",
+            f"   claim  [{conflict.claim_paper_id}]: {claim_text}",
+            f"   versus [{conflict.paper_id}] {conflict.unit_id}: {evidence}",
             "",
         ]
     return "\n".join(lines)

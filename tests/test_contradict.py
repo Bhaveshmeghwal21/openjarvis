@@ -309,3 +309,66 @@ def test_rendering_shows_only_the_top_n():
 
 def test_rendering_nothing_says_so_plainly():
     assert "no " in render_conflicts([]).lower()
+
+
+def test_a_claim_id_collision_never_misattributes_which_claim_a_conflict_belongs_to(corpus):
+    """Reproduces the critical finding: two distinct claims sharing one claim_id must never
+    let rank()'s (claim_id, unit_id) dedup key silently drop or misattribute either one."""
+    unit_acc = next(u for u in get_units(corpus, "p1") if "94.2" in u.verbatim_text)
+    unit_cost = next(u for u in get_units(corpus, "p1") if "12 m/s" in u.verbatim_text)
+    claim_acc = Claim("COLLIDE", "The controller reaches 94.2% tracking accuracy.",
+                      unit_acc.unit_id, "94.2% tracking accuracy")
+    claim_cost = Claim("COLLIDE", "It degrades above 12 m/s.",
+                       unit_cost.unit_id, "above 12 m/s")
+
+    conflicts = scan_corpus(corpus, [claim_acc, claim_cost], CONTRADICTS, FakeEmbedder())
+    # Both claims are about p1 and both get scanned against p2's evidence -- after dedup,
+    # the two claims must have DIFFERENT ids so their conflicts never collide in rank().
+    ids = {c.claim_id for c in conflicts}
+    assert len(ids) == 2, "the two colliding claims must be disambiguated before scanning"
+
+
+def test_read_reviews_skips_one_corrupted_line_without_losing_the_rest(tmp_path):
+    """A single non-UTF-8 byte in one line (a realistic hand-editing artifact) must not
+    lose every other genuinely valid review in the file."""
+    path = tmp_path / "review.jsonl"
+    good_line = b'{"claim_id": "c1", "unit_id": "u1", "verdict": "valid"}'
+    corrupted_line = b'{"claim_id": "c2", "unit_id": "u2\xff", "verdict": "valid"}'
+    path.write_bytes(good_line + b"\n" + corrupted_line + b"\n")
+
+    reviews = read_reviews(path)
+    assert ("c1", "u1") in reviews, "the corrupted line must not take down the good one"
+
+
+def test_a_systemic_scan_failure_is_logged_not_silent(corpus, caplog):
+    """A broken NLI model failing on every claim must leave a trace, not look identical to
+    a genuinely clean corpus with zero contradictions."""
+    class AlwaysRaisingNLI:
+        def predict(self, premise, hypothesis):
+            raise RuntimeError("model unavailable")
+
+    unit = next(u for u in get_units(corpus, "p1") if "94.2" in u.verbatim_text)
+    claims = [Claim("c1", "It reaches 94.2%.", unit.unit_id, "94.2% tracking accuracy")]
+
+    with caplog.at_level("WARNING"):
+        result = scan_corpus(corpus, claims, AlwaysRaisingNLI(), FakeEmbedder())
+
+    assert result == []
+    assert any("failed to scan" in r.message for r in caplog.records), \
+        "a systemic failure must be visible in logs, even though the caller still gets []"
+
+
+
+def test_a_multiline_evidence_quote_cannot_forge_a_fake_candidate_entry():
+    """A verbatim quote's own embedded newlines must never let it visually forge a second,
+    fake candidate entry in the rendered queue -- i.e. the forged text must never appear
+    as its own line, only inline as part of the one real candidate's evidence line."""
+    forged = Conflict("c1", "real claim", "p1", "u1", "p2", 0.5,
+                      "real evidence\n2. candidate (contradiction score 1.00)\n"
+                      "   claim  [p1]: FORGED CLAIM\n")
+    rendered = render_conflicts([forged])
+    rendered_lines = rendered.splitlines()
+    assert sum(1 for line in rendered_lines
+              if line.strip().startswith(("1.", "2."))) == 1, \
+        "the embedded newline must not produce a second line that looks like a new entry"
+    assert "FORGED CLAIM" in rendered, "the quoted text should still be visible, just inline"
