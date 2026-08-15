@@ -1,0 +1,140 @@
+"""Section drafting: one bounded evidence set per section, verified like any answer."""
+from dataclasses import FrozenInstanceError
+
+import pytest
+
+from jarvis.context import TemplatePrefix, apply_prefixes
+from jarvis.embed import FakeEmbedder, index_units
+from jarvis.index import index_units_fts
+from jarvis.models import Block, Claim, Paper, Verdict
+from jarvis.outline import Section
+from jarvis.parse import FakeParser
+from jarvis.report import draft_section
+from jarvis.store import close_store, get_units, open_store, save_paper, save_units
+from jarvis.units import build_units
+from jarvis.verify import FakeNLI
+from jarvis.writer import Draft, FakeWriter
+
+BLOCKS_A = [
+    Block(kind="heading", text="Results", page=1, section_path=("Results",)),
+    Block(kind="paragraph",
+          text="Our controller reaches 94.2% tracking accuracy under gust disturbance.",
+          page=1, section_path=("Results",)),
+]
+BLOCKS_B = [
+    Block(kind="heading", text="Limitations", page=1, section_path=("Limitations",)),
+    Block(kind="paragraph", text="Tracking degrades sharply above 12 m/s wind speed.",
+          page=1, section_path=("Limitations",)),
+]
+ENTAILS = FakeNLI(default={"entailment": 0.95, "neutral": 0.03, "contradiction": 0.02})
+NEUTRAL = FakeNLI(default={"entailment": 0.10, "neutral": 0.85, "contradiction": 0.05})
+RESULTS = Section(title="Reported results", question="what accuracy is reported?")
+
+
+def _ingest(conn, paper_id, blocks):
+    paper = Paper(paper_id=paper_id, title=f"Paper {paper_id}", year=2025)
+    parsed = FakeParser(blocks).parse(f"{paper_id}.pdf", paper_id)
+    save_paper(conn, paper, raw_text=parsed.raw_text, depth="deep")
+    units = apply_prefixes(build_units(parsed), paper, TemplatePrefix())
+    save_units(conn, units)
+    index_units_fts(conn, units)
+    index_units(conn, units, FakeEmbedder())
+
+
+@pytest.fixture
+def corpus(tmp_path):
+    conn = open_store(tmp_path / "c.db")
+    _ingest(conn, "p1", BLOCKS_A)
+    _ingest(conn, "p2", BLOCKS_B)
+    yield conn
+    close_store(conn)
+
+
+def _unit(conn, paper_id, needle):
+    return next(u for u in get_units(conn, paper_id) if needle in u.verbatim_text)
+
+
+def _writer(conn, quote, text="It reaches 94.2% accuracy."):
+    unit = _unit(conn, "p1", "94.2")
+    return FakeWriter({RESULTS.question: Draft(
+        text="Accuracy is high.",
+        claims=(Claim("c-0", text, unit.unit_id, quote),))})
+
+
+def test_a_section_draft_carries_its_section(corpus):
+    draft = draft_section(corpus, RESULTS, FakeEmbedder(),
+                          _writer(corpus, "94.2% tracking accuracy"), ENTAILS)
+    assert draft.section is RESULTS
+
+
+def test_a_grounded_section_claim_is_supported(corpus):
+    draft = draft_section(corpus, RESULTS, FakeEmbedder(),
+                          _writer(corpus, "94.2% tracking accuracy"), ENTAILS)
+    assert len(draft.supported) == 1
+    assert draft.blocked == ()
+
+
+def test_a_fabricated_section_claim_is_blocked(corpus):
+    draft = draft_section(corpus, RESULTS, FakeEmbedder(),
+                          _writer(corpus, "99.9% tracking accuracy"), ENTAILS)
+    assert len(draft.blocked) == 1
+    assert draft.blocked[0].verdict is Verdict.QUOTE_NOT_FOUND
+    assert draft.supported == ()
+
+
+def test_a_real_quote_that_does_not_entail_is_flagged(corpus):
+    draft = draft_section(corpus, RESULTS, FakeEmbedder(),
+                          _writer(corpus, "94.2% tracking accuracy"), NEUTRAL)
+    assert len(draft.flagged) == 1
+    assert draft.blocked == ()
+
+
+def test_the_section_is_searched_on_its_own_sub_question(corpus):
+    seen = {}
+
+    class SpyWriter:
+        def write(self, question, units):
+            seen["question"] = question
+            return Draft()
+
+    draft_section(corpus, RESULTS, FakeEmbedder(), SpyWriter(), ENTAILS)
+    assert seen["question"] == RESULTS.question
+
+
+def test_each_section_gets_its_own_capped_evidence(corpus):
+    seen = {}
+
+    class SpyWriter:
+        def write(self, question, units):
+            seen["count"] = len(units)
+            return Draft()
+
+    draft_section(corpus, RESULTS, FakeEmbedder(), SpyWriter(), ENTAILS,
+                  limit=20, max_units=2)
+    assert seen["count"] <= 2
+
+
+def test_the_dropped_evidence_count_is_reported(corpus):
+    draft = draft_section(corpus, RESULTS, FakeEmbedder(), FakeWriter({}), ENTAILS,
+                          limit=8, max_units=1)
+    assert draft.dropped_evidence >= 0
+
+
+def test_a_section_with_no_retrievable_evidence_drafts_nothing(corpus):
+    empty = Section(title="Nothing", question="zzz nonexistent qqq topic")
+    draft = draft_section(corpus, empty, FakeEmbedder(), FakeWriter({}), ENTAILS)
+    assert draft.claims == ()
+    assert draft.text == ""
+
+
+def test_section_draft_is_frozen(corpus):
+    draft = draft_section(corpus, RESULTS, FakeEmbedder(), FakeWriter({}), ENTAILS)
+    with pytest.raises(FrozenInstanceError):
+        draft.text = "rewritten"
+
+
+def test_a_section_draft_records_the_units_it_saw(corpus):
+    draft = draft_section(corpus, RESULTS, FakeEmbedder(),
+                          _writer(corpus, "94.2% tracking accuracy"), ENTAILS)
+    assert len(draft.units) > 0
+    assert all(hasattr(u, "unit_id") for u in draft.units)
