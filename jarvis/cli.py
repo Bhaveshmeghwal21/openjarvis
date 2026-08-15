@@ -32,9 +32,10 @@ from jarvis.contradict import (
 )
 from jarvis.evaluate import contradiction_precision
 from jarvis.fetch import fetch_pdf
-from jarvis.gate import screen
+from jarvis.gate import Signals, calibrate, calibration_report, screen
 from jarvis.gather import Candidate, gather, save_candidates
 from jarvis.ingest import failed, ingest_decided
+from jarvis.label import label_progress, read_labels, sample_seed, write_label_sheet
 from jarvis.models import Claim
 from jarvis.report import corpus_cards, render_report, write_report
 from jarvis.router import ModelRouter
@@ -47,7 +48,9 @@ from jarvis.sources import (
 )
 from jarvis.store import (
     close_store,
+    get_paper,
     get_papers_by_depth,
+    get_screen_signals,
     open_store,
     save_run,
 )
@@ -507,6 +510,77 @@ def cmd_review(conn, args: argparse.Namespace) -> int:
     return 0
 
 
+def _screened_candidates(conn, run_id: str) -> tuple[list[Candidate], dict[str, Signals]]:
+    """Every paper `screen()` scored under `run_id`, as `Candidate`s (for
+    `sample_seed`/`write_label_sheet`, which read `.paper` dict fields) plus their raw
+    `Signals` (for `calibrate()`). Reuses the same id-preserving reconstruction as
+    `_resumable_candidates` in `cmd_gather` -- `Candidate.pid` must resolve back to the
+    exact stored `paper_id`, or every downstream lookup silently keys on the wrong id."""
+    raw_signals = get_screen_signals(conn, run_id)
+    candidates: list[Candidate] = []
+    signal_rows: dict[str, Signals] = {}
+    for paper_id, scores in raw_signals.items():
+        paper = get_paper(conn, paper_id)
+        if paper is None:
+            continue
+        candidates.append(Candidate(paper={
+            "id": paper.paper_id, "title": paper.title, "abstract": paper.abstract,
+            "year": paper.year, "arxiv_id": paper.arxiv_id or paper.paper_id,
+            "s2_id": paper.s2_id,
+        }))
+        signal_rows[paper_id] = Signals(**{k: v for k, v in scores.items()
+                                          if k in ("embedding", "graph", "keyword",
+                                                   "llm_vote")})
+    return candidates, signal_rows
+
+
+def cmd_calibrate(conn, args: argparse.Namespace) -> int:
+    """The gate's hand-label round trip (design spec §7B): `sample_seed` ->
+    `write_label_sheet` -> [a human edits it] -> `read_labels` -> `calibrate` ->
+    `calibration_report`, plus `label_progress` for a sheet still in progress."""
+    labels_dir = Path(resolve_db_path(project=args.project, db=args.db)).parent / "labels"
+
+    if args.subcommand == "seed":
+        candidates, _ = _screened_candidates(conn, args.run_id)
+        if not candidates:
+            print(f"error: no screened papers found for run_id={args.run_id!r} — "
+                  f"run `jarvis gather` first", file=sys.stderr)
+            return 1
+        seed = sample_seed(candidates, size=args.size)
+        sheet_path = labels_dir / "seed.jsonl"
+        n = write_label_sheet(sheet_path, seed)
+        print(f"wrote {n} paper(s) to label at {sheet_path}")
+        return 0
+
+    if args.subcommand == "progress":
+        progress = label_progress(args.sheet)
+        print(f"labeled {progress['labeled']}/{progress['total']} "
+              f"({progress['relevant']} relevant, {progress['remaining']} remaining)")
+        return 0
+
+    if args.subcommand == "fit":
+        _, signal_rows = _screened_candidates(conn, args.run_id)
+        labels = read_labels(args.sheet)
+        relevant = [pid for pid, is_relevant in labels.items()
+                   if is_relevant and pid in signal_rows]
+        if not relevant:
+            print("error: no labeled-relevant paper in this sheet matches a screened "
+                  "paper for this run_id — calibration needs at least one true positive",
+                  file=sys.stderr)
+            return 1
+
+        thresholds = calibrate(signal_rows, labels)
+        report = calibration_report(signal_rows, labels, thresholds)
+        print(f"recall: {report['recall']:.1%}  precision: {report['precision']:.1%}")
+        print(f"kept {report['kept']}/{report['labeled']} labeled paper(s), "
+              f"{report['relevant_kept']}/{report['relevant']} relevant kept")
+        print(f"thresholds: {report['thresholds']}")
+        return 0
+
+    print(f"error: unknown calibrate subcommand {args.subcommand!r}", file=sys.stderr)
+    return 2
+
+
 COMMANDS = {
     "status": cmd_status,
     "gather": cmd_gather,
@@ -514,6 +588,7 @@ COMMANDS = {
     "report": cmd_report,
     "contradictions": cmd_contradictions,
     "review": cmd_review,
+    "calibrate": cmd_calibrate,
 }
 
 
@@ -558,6 +633,24 @@ def _build_parser() -> argparse.ArgumentParser:
     review_p = sub.add_parser("review")
     _add_store_args(review_p)
     review_p.add_argument("sheet", help="path to a reviewed contradictions.jsonl sheet")
+
+    calibrate_p = sub.add_parser("calibrate")
+    _add_store_args(calibrate_p)
+    calibrate_sub = calibrate_p.add_subparsers(dest="subcommand", required=True)
+
+    seed_p = calibrate_sub.add_parser("seed")
+    seed_p.add_argument("--run-id", required=True,
+                        help="the gather run_id whose screened papers to sample from")
+    seed_p.add_argument("--size", type=int, default=100,
+                        help="seed set size (sample_seed()'s own size parameter)")
+
+    fit_p = calibrate_sub.add_parser("fit")
+    fit_p.add_argument("--run-id", required=True,
+                       help="the gather run_id whose screened papers to calibrate against")
+    fit_p.add_argument("sheet", help="path to a hand-labeled seed.jsonl sheet")
+
+    progress_p = calibrate_sub.add_parser("progress")
+    progress_p.add_argument("sheet", help="path to a label sheet in progress")
 
     return parser
 
