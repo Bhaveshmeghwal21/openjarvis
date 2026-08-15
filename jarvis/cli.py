@@ -18,12 +18,14 @@ import time
 import uuid
 from pathlib import Path
 
+from jarvis.answer import ask, render_answer
 from jarvis.card import extract_and_verify
 from jarvis.config import Config
 from jarvis.fetch import fetch_pdf
 from jarvis.gate import screen
 from jarvis.gather import Candidate, gather, save_candidates
 from jarvis.ingest import failed, ingest_decided
+from jarvis.report import corpus_cards, render_report, write_report
 from jarvis.router import ModelRouter
 from jarvis.sources import (
     combine_sources,
@@ -336,9 +338,71 @@ def _run_gather(conn, args: argparse.Namespace, config: Config, router,
     return 0
 
 
+def cmd_ask(conn, args: argparse.Namespace) -> int:
+    """Thin wrapper over `ask()` -> `render_answer()`. Needs a writer and an NLI model."""
+    config = Config.load()
+    router = ModelRouter(overrides=config.model_overrides)
+    try:
+        embedder = build_embedder(config)
+        writer = build_writer(config, router)
+        nli = build_nli(config)
+    except ModelBuildError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    answer = ask(conn, args.question, embedder, writer, nli)
+    print(render_answer(answer))
+
+    if args.out:
+        Path(args.out).write_text(render_answer(answer), encoding="utf-8")
+    return 0
+
+
+def cmd_report(conn, args: argparse.Namespace) -> int:
+    """Thin wrapper over `write_report()` -> `render_report()`.
+
+    Fails loud when `corpus_cards(conn)` is empty rather than emitting an empty report
+    (design spec §5.2) — without this, a corpus that never had card extraction wired in
+    (the exact gap this whole spec closes for `jarvis gather`) would produce a report
+    that looks broken rather than a clear, named reason why.
+    """
+    cards = corpus_cards(conn)
+    if not cards:
+        print("error: no Layer 2 cards in this corpus — run `jarvis gather --yes` "
+              "first, or this project's deep-read papers were ingested before card "
+              "extraction was wired in and need a re-gather", file=sys.stderr)
+        return 1
+
+    config = Config.load()
+    router = ModelRouter(overrides=config.model_overrides)
+    try:
+        embedder = build_embedder(config)
+        writer = build_writer(config, router)
+        nli = build_nli(config)
+    except ModelBuildError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        outliner = build_outliner(config, router)
+    except ModelBuildError:
+        from jarvis.outline import TemplateOutliner
+        outliner = TemplateOutliner()
+
+    report = write_report(conn, args.topic, outliner, embedder, writer, nli)
+    rendered = render_report(conn, report)
+    print(rendered)
+
+    if args.out:
+        Path(args.out).write_text(rendered, encoding="utf-8")
+    return 0
+
+
 COMMANDS = {
     "status": cmd_status,
     "gather": cmd_gather,
+    "ask": cmd_ask,
+    "report": cmd_report,
 }
 
 
@@ -360,6 +424,16 @@ def _build_parser() -> argparse.ArgumentParser:
                                "budget parameter)")
     gather_p.add_argument("--limit", type=int, default=20,
                           help="max results per search query, per source")
+
+    ask_p = sub.add_parser("ask")
+    _add_store_args(ask_p)
+    ask_p.add_argument("question", help="the question to answer from the corpus")
+    ask_p.add_argument("--out", default=None, help="also write the rendered answer here")
+
+    report_p = sub.add_parser("report")
+    _add_store_args(report_p)
+    report_p.add_argument("topic", help="the report topic")
+    report_p.add_argument("--out", default=None, help="also write the rendered report here")
 
     return parser
 
