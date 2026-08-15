@@ -208,3 +208,43 @@ def test_one_failed_fetch_is_per_paper_data_never_a_crash(tmp_path, monkeypatch)
     ]
     assert results[0] is not None
     assert results[1] is None
+
+
+def test_a_realistic_user_agent_is_sent_not_httpxs_default(tmp_path, monkeypatch):
+    # Found live: httpx's default "python-httpx/x.y.z" User-Agent gets a bare 403 from
+    # MDPI's Akamai bot detection on a paper that is otherwise open access -- the fetch
+    # never reaches the magic-byte check at all. A browser-shaped UA is enough to be
+    # served the same publicly-available PDF a browser would get.
+    cache_dir = tmp_path / "pdfs"
+    captured_kwargs = {}
+
+    def spy_client(**kw):
+        captured_kwargs.update(kw)
+        return _FakeClient({"http://example.com/x.pdf": _FakeResponse(_REAL_PDF_BYTES)})
+
+    monkeypatch.setattr("httpx.Client", spy_client)
+
+    fetch_pdf({"pdf_url": "http://example.com/x.pdf"}, cache_dir,
+             unpaywall_email="me@example.com", paper_id="p1")
+
+    headers = captured_kwargs.get("headers", {})
+    assert "python-httpx" not in headers.get("User-Agent", "")
+    assert "Mozilla" in headers.get("User-Agent", "")
+
+
+def test_redirects_are_followed(tmp_path, monkeypatch):
+    # Several real sources (DOI resolvers, institutional repositories) reach the actual
+    # PDF only after a redirect -- httpx.Client does not follow redirects by default.
+    cache_dir = tmp_path / "pdfs"
+    captured_kwargs = {}
+
+    def spy_client(**kw):
+        captured_kwargs.update(kw)
+        return _FakeClient({"http://example.com/x.pdf": _FakeResponse(_REAL_PDF_BYTES)})
+
+    monkeypatch.setattr("httpx.Client", spy_client)
+
+    fetch_pdf({"pdf_url": "http://example.com/x.pdf"}, cache_dir,
+             unpaywall_email="me@example.com", paper_id="p1")
+
+    assert captured_kwargs.get("follow_redirects") is True

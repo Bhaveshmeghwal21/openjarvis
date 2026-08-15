@@ -23,6 +23,15 @@ _TIMEOUT = 30
 _MAX_ATTEMPTS = 2  # one try plus one retry
 _SAFE_ID = re.compile(r"[^A-Za-z0-9._-]")
 
+# httpx's default User-Agent ("python-httpx/x.y.z") is blocked outright by several
+# publishers' CDN-level bot detection (confirmed live: MDPI returns a bare 403 from
+# Akamai on that UA, for a paper that is otherwise open access). A standard browser UA
+# is enough to fetch the same single, publicly-served PDF a browser would.
+_HEADERS = {
+    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                   "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"),
+}
+
 
 def _cache_path(cache_dir: Path, paper_id: str) -> Path:
     """A paper id used as a filename must never let `..` or a path separator escape the
@@ -47,7 +56,8 @@ def _download(url: str) -> bytes | None:
 
     for attempt in range(_MAX_ATTEMPTS):
         try:
-            with httpx.Client(timeout=_TIMEOUT) as client:
+            with httpx.Client(timeout=_TIMEOUT, headers=_HEADERS,
+                              follow_redirects=True) as client:
                 resp = client.get(url)
                 resp.raise_for_status()
                 content_type = resp.headers.get("content-type", "")
