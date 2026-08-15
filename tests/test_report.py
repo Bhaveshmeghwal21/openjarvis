@@ -9,7 +9,7 @@ from jarvis.index import index_units_fts
 from jarvis.models import Block, Claim, Paper, Verdict
 from jarvis.outline import Section
 from jarvis.parse import FakeParser
-from jarvis.report import draft_section
+from jarvis.report import SectionDraft, draft_section
 from jarvis.store import close_store, get_units, open_store, save_paper, save_units
 from jarvis.units import build_units
 from jarvis.verify import FakeNLI
@@ -138,3 +138,76 @@ def test_a_section_draft_records_the_units_it_saw(corpus):
                           _writer(corpus, "94.2% tracking accuracy"), ENTAILS)
     assert len(draft.units) > 0
     assert all(hasattr(u, "unit_id") for u in draft.units)
+
+
+
+from jarvis.report import duplicate_claims, integrate
+
+S1 = Section(title="One", question="q1")
+S2 = Section(title="Two", question="q2")
+
+
+def _draft(section, claims, verdicts=None):
+    from jarvis.models import Verification
+    verdicts = verdicts or [Verdict.SUPPORTED] * len(claims)
+    return SectionDraft(
+        section=section, text="t", claims=tuple(claims),
+        verifications=tuple(Verification(claim_id=c.claim_id, unit_id=c.unit_id,
+                                         quote_found=True, verdict=v)
+                            for c, v in zip(claims, verdicts)))
+
+
+def test_a_claim_repeated_across_sections_survives_only_in_the_first():
+    shared = Claim("a-0", "The controller reaches 94.2%.", "u1", "94.2")
+    later = Claim("b-0", "The controller reaches 94.2%.", "u1", "94.2")
+    merged = integrate([_draft(S1, [shared]), _draft(S2, [later])])
+    assert len(merged[0].claims) == 1
+    assert merged[1].claims == ()
+
+
+def test_dropping_a_duplicate_claim_drops_its_verification_too():
+    shared = Claim("a-0", "same", "u1", "q")
+    later = Claim("b-0", "same", "u1", "q")
+    merged = integrate([_draft(S1, [shared]), _draft(S2, [later])])
+    assert merged[1].verifications == ()
+
+
+def test_the_same_unit_cited_for_two_different_points_keeps_both():
+    merged = integrate([_draft(S1, [Claim("a-0", "It is accurate.", "u1", "q")]),
+                        _draft(S2, [Claim("b-0", "It is fast.", "u1", "q")])])
+    assert len(merged[0].claims) == 1
+    assert len(merged[1].claims) == 1
+
+
+def test_the_same_point_from_two_different_units_keeps_both():
+    merged = integrate([_draft(S1, [Claim("a-0", "It is accurate.", "u1", "q")]),
+                        _draft(S2, [Claim("b-0", "It is accurate.", "u2", "q")])])
+    assert len(merged[1].claims) == 1
+
+
+def test_duplicate_matching_ignores_whitespace_and_case():
+    merged = integrate([_draft(S1, [Claim("a-0", "It  is Accurate.", "u1", "q")]),
+                        _draft(S2, [Claim("b-0", "it is accurate.", "u1", "q")])])
+    assert merged[1].claims == ()
+
+
+def test_a_claim_repeated_inside_one_section_is_also_deduped():
+    merged = integrate([_draft(S1, [Claim("a-0", "same", "u1", "q"),
+                                    Claim("a-1", "same", "u1", "q")])])
+    assert len(merged[0].claims) == 1
+
+
+def test_integration_preserves_section_order_and_identity():
+    merged = integrate([_draft(S1, []), _draft(S2, [])])
+    assert [d.section.title for d in merged] == ["One", "Two"]
+
+
+def test_duplicates_are_reportable_not_only_removed():
+    shared = Claim("a-0", "same", "u1", "q")
+    later = Claim("b-0", "same", "u1", "q")
+    dupes = duplicate_claims([_draft(S1, [shared]), _draft(S2, [later])])
+    assert dupes == [("Two", "b-0")]
+
+
+def test_integrating_nothing_is_nothing():
+    assert integrate([]) == []
