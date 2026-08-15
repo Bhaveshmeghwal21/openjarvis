@@ -1,15 +1,17 @@
 # Handoff — jarvis
 
-Updated 2026-08-15 (fifth update). Supersedes the prior version, which described
-`compile-cited-qa` as complete but unmerged. It is now merged to `main` and pushed.
+Updated 2026-08-15 (sixth update). Supersedes the prior version, which described spec
+build steps 1-7 as complete and merged, with step 8 (MCP server) not yet started.
 
-**State in one line:** spec build steps 1–7 are on `main` and pushed. Steps 8–10 each have
-a written plan; none has been started, and none is blocked anymore.
+**State in one line:** spec build steps 1–7 are on `main` and pushed. Step 8 (MCP server)
+is complete on branch `mcp-server`, tested, adversarially reviewed, fixed, not yet merged.
+Steps 9–10 each have a written plan; neither has been started.
 
 ## Orient yourself in 60 seconds
 
 ```
-main:  406f995 (steps 1-7), pushed, in sync with origin
+main:        4be7458 (steps 1-7), pushed, in sync with origin
+mcp-server:  branched from 4be7458, HEAD at 629ee0f, NOT YET MERGED
 ```
 
 | What | Where |
@@ -18,118 +20,100 @@ main:  406f995 (steps 1-7), pushed, in sync with origin
 | Completed plan, steps 1-5 | `docs/plans/2026-08-11-verifiable-single-paper-core.md` |
 | Completed plan, step 6 | `docs/plans/2026-08-14-gather-and-gate.md` |
 | Completed plan, step 7 | `docs/plans/2026-08-14-compile-cited-qa.md` |
-| **Written but not started: steps 8, 9, 10** | `docs/plans/2026-08-14-{mcp-server,contradiction-detection,longform-reports}.md` |
+| Completed plan, step 8 (on `mcp-server`, unmerged) | `docs/plans/2026-08-14-mcp-server.md` |
+| **Written but not started: steps 9, 10** | `docs/plans/2026-08-14-{contradiction-detection,longform-reports}.md` |
 | Record of steps 1-5's build + review | `LEDGER.md` (on `main`) |
 | Record of step 6's build + two-round review | `LEDGER-gather-and-gate.md` (on `main`) |
 | Record of step 7's build + review | `LEDGER-compile-cited-qa.md` (on `main`) |
+| Record of step 8's build + review | `LEDGER-mcp-server.md` (only on `mcp-server` until merged) |
 
 ```
 main:
-  HEAD:   406f995  merge: compile — cited Q&A (spec build step 7)
+  HEAD:   4be7458  docs: update handoff for compile-cited-qa merge
   tests:  403 passing
   ruff:   11 pre-existing violations, zero new
   remote: origin -> https://github.com/Bhaveshmeghwal21/openjarvis (public), pushed, in sync
+
+mcp-server (unmerged):
+  HEAD:   629ee0f  docs: ledger for mcp-server (spec build step 8)
+  tests:  449 passing (403 baseline + 46 new)
+  ruff:   still exactly 11 pre-existing violations, zero new
 ```
 
 ## What changed since the last handoff
 
-**`compile-cited-qa` (spec build step 7) was merged into `main` and pushed.** Merge was a
-plain `--no-ff` merge commit (no conflicts), matching the pattern of the step-6 merge. Full
-test suite re-run on `main` after the merge: 403 passing, exit 0. The worktree and local
-branch were removed afterward (`git worktree remove`, `git branch -d`) — the branch's
-history lives on in `main` and in `LEDGER-compile-cited-qa.md`.
+**The MCP server plan (spec build step 8) was fully executed**, on a new worktree and
+branch (`mcp-server`), in one continuous session: all 5 plan tasks implemented directly, a
+final whole-branch adversarial review, a fix wave, and a ledger. Not yet merged.
 
-Before merging, the rationale was checked explicitly rather than assumed: the branch met
-the same completion bar as the two branches already on `main` (full plan, final
-whole-branch adversarial review, fix wave, independent re-review, tests green, ruff clean),
-the one open item (Task 2's RRF fix lacking a regression test) was a coverage gap already
-examined and deliberately parked rather than a correctness risk, and downstream plans (MCP
-server, long-form reports) were blocked on this branch's modules — holding it unmerged had
-no upside and a real downside (single point of failure, not pushed, not visible to any
-other session).
+The corpus is now exposed as 6 tools over a pure dispatcher with no protocol dependency
+(`jarvis/tools.py`): `corpus_search`, `get_unit`, `get_paper`, `list_papers`,
+`verify_quote`, `ask`. A thin stdio adapter (`jarvis/mcp_server.py`) translates the MCP
+protocol to and from that dispatcher and contains zero corpus logic — confirmed both by a
+targeted test and by the final review reading the file directly. `mcp` is imported lazily
+and never at module scope in either file; the whole package (including `jarvis.tools`)
+still imports cleanly with `mcp` absent.
 
 ## What is built
 
-Spec §13 lists ten build steps. **1 through 7 are done, all on `main`.**
+Spec §13 lists ten build steps. **1 through 8 are done.** 1–7 are on `main`; 8 is complete
+on `mcp-server`, unmerged.
 
 | Step | Status | Modules |
 |---|---|---|
 | 1. Storage + data model | done, `main` | `models.py`, `store.py` |
 | 2. Parse + typed units | done, `main` | `parse.py`, `units.py`, `context.py`, `text.py` |
-| 3. Retrieval | done, `main`, two caveats below | `index.py`, `embed.py`, `retrieve.py` |
-| 4. Verification | done, `main`, one caveat below | `verify.py` |
-| 5. Eval harness | done, `main`, one gap below | `evaluate.py` |
+| 3. Retrieval | done, `main`, caveats below | `index.py`, `embed.py`, `retrieve.py` |
+| 4. Verification | done, `main`, caveat below | `verify.py` |
+| 5. Eval harness | done, `main` | `evaluate.py` |
 | 6. Gather + gate | done, `main` | `gather.py`, `gate.py`, `label.py`, `ingest.py`, `card.py` + extensions to `store.py`/`sources.py` |
-| 7. Compile — cited Q&A | **done, `main`** | `evidence.py`, `retriever.py`, `writer.py`, `answer.py` |
-| 8-10 | **not started, unblocked** | plans written, see table below |
+| 7. Compile — cited Q&A | done, `main` | `evidence.py`, `retriever.py`, `writer.py`, `answer.py` |
+| 8. MCP server | **done, `mcp-server`, unmerged** | `tools.py`, `mcp_server.py` |
+| 9-10 | **not started** | plans written, see table below |
 
-Caveats carried forward, still true:
+Caveats carried forward from before, still true:
 
-- **Step 3's "exposed as agent tools"** is not done — that's step 8, the MCP server plan.
-- **Step 3's `sqlite-vec`** was deliberately replaced with brute-force numpy cosine.
-- **Step 4's `quote_is_grounded`** has a real, pre-existing (unchanged since the
-  single-paper-core plan) gap: it falls back to matching a quote anywhere in the paper's
-  raw text, not just the cited unit, so a quote that only exists in a *different* unit of
-  the same paper can still ground a claim citing the *wrong* unit. Harmless while nothing
-  renders `[unit_id]` to a human — but step 7 is the first code that does exactly that.
-  Flagged in `LEDGER-compile-cited-qa.md` as a real follow-up against `verify.py` itself,
-  deliberately not bundled into step 7's branch since the root cause predates it entirely.
-- **Step 5's "seed labeling tool"** is built (`jarvis/label.py`). Citation precision/recall
-  now exist too (step 7, `jarvis/evaluate.py`). Still missing: contradiction precision
-  (step 9); cost-per-project is unclaimed by any plan — see Loose ends.
+- **`jarvis.verify.quote_is_grounded`'s paper-level fallback** (pre-existing since the
+  single-paper-core plan, unchanged by every branch since) lets a quote that exists only
+  in a *different* unit of the same paper still ground a claim citing the *wrong* unit.
+  `verify_quote` (the new MCP tool) inherits this exactly as-is — it calls
+  `quote_is_grounded` directly. Still flagged as a real follow-up against `verify.py`
+  itself in `LEDGER-compile-cited-qa.md`; still not bundled into any branch, including
+  this one, since the root cause predates all of them.
+- **`sqlite-vec`** was deliberately replaced with brute-force numpy cosine (step 3).
+- **Reranker: local vs hosted** — still unmeasured.
 
-Step 7 in detail: iterative retrieval where a `Refiner` proposes follow-up queries fused
-across rounds by Reciprocal Rank Fusion (reusing `jarvis.retrieve.rrf`), a hard evidence
-cap with primacy/recency reordering, a writer subagent emitting explicit
-`(claim, unit_id, quote)` triples with two mechanical rejection rules, and `ask()` wiring
-retrieve → cap → write → verify with claims mechanically deduped and re-checked against
-the bounded evidence set before verification runs. Three outcomes: SUPPORTED (kept,
-cited), NEUTRAL/CONTRADICTED (flagged with a warning), QUOTE_NOT_FOUND (blocked, removed
-from the rendered answer entirely).
+## The mcp-server adversarial review — worth reading before touching tools.py or mcp_server.py
 
-## The compile-cited-qa adversarial review — worth reading before touching answer.py, writer.py, or retriever.py
+`LEDGER-mcp-server.md` has the complete record. The final whole-branch review found 0
+Critical, 0 Important, 6 Minor findings — the cleanest result of any branch on this repo so
+far, and it explicitly did **not** repeat the Critical claim-id-collision defect class
+found on `compile-cited-qa`, confirmed by testing duplicate `claim_id` collisions in three
+orderings against the `ask` tool specifically.
 
-`LEDGER-compile-cited-qa.md` has the complete record. The final whole-branch review found
-1 Critical + 5 Important findings, all tracing to the plan's own reference code:
+Two findings were worth fixing and were fixed: `clamp_limit`'s `except` clause missed
+`OverflowError` (caught by the dispatcher's own outer defense-in-depth regardless, but
+worth closing at the source); `ask`'s tool description omitted mentioning its `nli`
+dependency despite requiring it. One finding (`list_papers`'s `DEPTHS` including
+`"abstract"`) was investigated and found on closer inspection **not to be a defect at
+all** — `store.py`'s own schema comment documents `abstract` as part of the `depth`
+column's vocabulary, reserved for a future ingest stage. The remaining findings (an N+1
+query pattern in `list_papers`, a test-methodology gap in how the "no `mcp` import" rule is
+asserted, and an already-resolved import-style note) were parked with documented
+reasoning.
 
-- **`Answer.claim_for`'s first-match id lookup (Critical, fixed).** If two claims in one
-  `Draft` ever share a `claim_id`, a verdict for one can get attached to the other via the
-  lookup — demonstrated directly: a blocked (fabricated) claim's text rendered under a
-  citation while the footer simultaneously said it was removed. Not reachable by any
-  writer shipped in this branch (ids are always unique in practice), but `Writer` is an
-  untrusted `typing.Protocol` boundary with nothing enforcing that structurally. Fixed by
-  guaranteeing unique ids in `ask()` before verification runs.
-- **`ask()` never re-checked a citation against its own bounded evidence set (Important,
-  fixed).** The "no citation outside evidence" rule lived only inside one `Writer`
-  implementation, not enforced on the consuming side.
-- **Primacy/recency ordering inside `ask()` was unverified (Important, fixed).** Swapping
-  `order_for_context()` for `reversed()` left the whole suite green.
-- **Two "no retrievable evidence" tests were vacuous (Important, fixed) — the fourth
-  instance of a pattern already fixed twice during Tasks 4 and 6.** `FakeEmbedder`'s
-  vector search has no relevance floor, so a "nonsense query" against the shared fixture
-  still returned every unit; the tests only passed via the writer's own empty-draft
-  fallback, never via genuinely empty retrieval.
-- **A dead LLM call reads to the user as "empty corpus," silently (Important, fixed).**
-  `LLMWriter`/`LLMRefiner` swallowed every model failure with no logging.
-- **Task 2's own RRF fusion fix has no real regression test (Important, parked, human
-  declined to fix).** Confirmed directly: reverting `jarvis/retriever.py` to its pre-fix
-  round-block-concatenation version leaves all 14 `test_retriever.py` tests passing — the
-  "corrected" dedup test only asserts id-uniqueness and round count, never order. **Still
-  open on `main`** — a real coverage gap worth closing before anyone next modifies
-  `retriever.py`, since a regression there wouldn't be caught.
+The fix wave's re-review was done directly by the controller rather than re-dispatched —
+both fixes were mutation-tested (the pre-fix code path was reconstructed and confirmed to
+genuinely fail, not just re-run against the existing suite) rather than merely inspected.
 
-Every fix was independently re-verified — for the two highest-stakes ones (the Critical
-id-collision fix and the ordering fix), the controller **temporarily reverted each fix and
-confirmed its own regression test genuinely fails without it**, then restored and
-reconfirmed green, rather than trusting review by inspection alone.
-
-**The pattern worth internalizing from this branch specifically:** a test asserting
-`X <= N` or `X >= 0` is not evidence that X is being computed correctly — it can pass
-whether the computation runs or not. This happened four separate times across one plan
-(Tasks 4, 6, and two more caught only by the final review). The fix every time was the
-same: recompute the expected value independently using the same primitives the code under
-test uses, and compare — or, when checking a fix specifically, temporarily revert the fix
-and confirm the test actually fails.
+**The pattern worth internalizing from this branch specifically:** the same
+`FakeEmbedder`-has-no-relevance-floor vacuous-test pattern that hit `compile-cited-qa` four
+times hit this branch too, on the very first task that touched retrieval
+(`corpus_search`'s empty-hits test). The fix was identical to the established precedent:
+use a genuinely empty store, not a "nonsense enough" query string, because against a
+nonempty store no query is nonsense enough for RRF fusion to return zero hits. This is now
+five occurrences of the same root cause across two branches — worth hardening
+`FakeEmbedder` itself with an opt-in relevance floor if a sixth branch hits it.
 
 ## The remaining plans
 
@@ -137,14 +121,15 @@ and confirm the test actually fails.
 |---|---|---|---|---|
 | 1 | `2026-08-14-gather-and-gate.md` | 6 | 13 | **done, merged, pushed** |
 | 2 | `2026-08-14-compile-cited-qa.md` | 7 | 6 | **done, merged, pushed** |
-| 3 | `2026-08-14-mcp-server.md` | 8 | 5 | not started; unblocked (depends on plan 2, now on `main`) |
+| 3 | `2026-08-14-mcp-server.md` | 8 | 5 | **done, unmerged** (branch `mcp-server`) |
 | 4 | `2026-08-14-contradiction-detection.md` | 9 | 5 | not started; *useful* only once a real gathered corpus exists |
-| 5 | `2026-08-14-longform-reports.md` | 10 | 6 | not started; unblocked (depends on plan 2, now on `main`) |
+| 5 | `2026-08-14-longform-reports.md` | 10 | 6 | not started; unblocked (depends on plan 2, on `main`) |
 
-**Recommended next: MCP server**, then contradiction detection and long-form reports in
-either order. MCP server is the smallest and most self-contained of the three, and it's
-what makes the corpus usable from Claude Code before any UI exists. All three can now
-branch straight from `main` — no more need to branch from another feature branch.
+**Recommended next, once `mcp-server` is merged: long-form reports**, then contradiction
+detection, or either order — both are now fully unblocked. Contradiction detection is
+listed second only because it is most useful once a real (not just test-fixture) gathered
+corpus exists to run it over; if a real corpus already exists by the time this is read,
+either order is fine.
 
 Each plan is self-contained: goal, architecture, global constraints, file structure, and
 per-task TDD steps with the actual code. Hand one to a fresh session and it needs nothing
@@ -163,20 +148,24 @@ else from this document or any conversation history.
 3. Per task: implement directly or dispatch a subagent implementer — both have worked
    well. Whichever is used, the pre-flight-scan and TDD discipline below must still be
    followed exactly.
-4. After the last task: one whole-branch adversarial review on the most capable model.
+4. After the last task: one whole-branch adversarial review, ideally dispatched to a
+   subagent for a genuinely independent pass — every branch so far has found at least one
+   real issue this way, even when (as with `mcp-server`) the result was 0 Critical/0
+   Important.
 5. **After any fix wave, get an independent re-review of the fix itself** — not just of
    the original finding. If the dispatching/re-reviewing agent hits a session usage limit
    mid-task, check `git log`/`git status` before assuming anything failed — the commit
    frequently already landed. It's fine for the controller to perform the re-review
-   directly rather than re-dispatching, especially for a small fix — but for a
-   safety-critical fix (this branch had one), **mutation-test it yourself**: temporarily
-   revert the fix, confirm its regression test actually fails, then restore.
+   directly rather than re-dispatching for a small, non-safety-critical fix wave (as with
+   `mcp-server`'s two Minor fixes) — but for a safety-critical fix, **mutation-test it
+   yourself regardless of who does the re-review**: temporarily revert the fix, confirm
+   its regression test actually fails, then restore.
 6. Merge to `main` and push only with explicit go-ahead — every branch so far has waited
    for that, and `main` has a public remote, which raises the stakes of an unreviewed push.
    When the human does confirm, run the full test suite again on `main` itself after the
    merge (not just on the branch) before pushing — the merge itself is worth verifying.
 
-## Patterns worth keeping — reconfirmed across four branches now
+## Patterns worth keeping — reconfirmed across five branches now
 
 - **Pre-flight scan before every task.** Read the task's actual dependency signatures
   against the plan's assumptions before writing anything.
@@ -191,24 +180,32 @@ else from this document or any conversation history.
 
   A fix's own regression is categorized and re-reviewed exactly like an original finding.
 
-- **A test asserting `<=`, `>=`, or "count didn't go up" is a red flag, not proof.** Four
-  separate vacuous-test findings across `compile-cited-qa` alone, all sharing one root
-  cause: a fixture too small, too uniform, or too permissive (`FakeEmbedder` has no
-  relevance floor) for the assertion to ever have a chance of failing. The fix is always
-  the same: recompute the expected value independently with the same primitives the code
-  under test uses, and compare — or, when checking whether a *fix* is real, temporarily
-  revert it and confirm the test actually fails without it.
+- **Not every review finding is actually a defect — verify before fixing, not just before
+  trusting a claim of resolution.** `mcp-server`'s Finding 1 (`"abstract"` as a phantom
+  depth value) looked real until `store.py`'s own schema comment was checked directly,
+  which showed it documented as part of the depth vocabulary all along. The fix-wave
+  discipline of "confirm independently before acting" applies to *deciding whether to fix
+  something* just as much as it applies to *confirming a fix worked*.
+
+- **`FakeEmbedder` has no relevance floor — this has now caused the identical vacuous-test
+  failure five times across two branches.** Any new test asserting "a nonsense query
+  returns zero hits" against a *nonempty* store will fail this way; use a genuinely empty
+  store instead. If a sixth branch hits this, it's worth adding an opt-in relevance floor
+  to `FakeEmbedder` directly rather than fixing test-by-test forever.
+
+- **A test asserting `<=`, `>=`, or "count didn't go up" is a red flag, not proof.** Recompute
+  the expected value independently with the same primitives the code under test uses, and
+  compare — or, when checking whether a *fix* is real, temporarily revert it and confirm
+  the test actually fails without it.
 
 - **A session-limit failure on a dispatched agent is not necessarily a task failure.**
-  Check `git log`/`git status` in the target worktree before treating it as one — the
-  agent may have completed and committed the actual work before dying while writing its
-  own report file.
+  Check `git log`/`git status` in the target worktree before treating it as one.
 
 - Run ruff against both modified and new test files, every task. Resolve stale counts in a
   plan's prose in favor of the literal code. Never dispatch two implementer subagents in
   parallel. Every external model behind a `typing.Protocol` with a deterministic `Fake*`,
-  every heavy dependency imported inside the function that needs it — this is why 403
-  tests run offline in about thirteen seconds.
+  every heavy dependency imported inside the function that needs it — this is why 449
+  tests run offline in under twenty seconds, `mcp` included, without it installed.
 
 ## Gotchas
 
@@ -232,36 +229,48 @@ else from this document or any conversation history.
 
 - **The ruff baseline is 11**, in `citation_graph.py` (2), `config.py` (1), `scoring.py`
   (1), `sources.py` (6), `test_ported.py` (1) — all files ported from NanoResearch, not
-  written for this project. Confirmed unchanged through four full plans now. Do not fix
+  written for this project. Confirmed unchanged through five full plans now. Do not fix
   as part of feature work; do not add to it.
+
+- **A subagent reviewer's stated test count can be wrong even when its qualitative
+  findings are right** — `mcp-server`'s final review reported 569 tests; the controller's
+  own `--junit-xml` run on the same commit said 448. The findings were still independently
+  verified and were real (where real); the raw count was simply disregarded as unreliable.
+  Always re-run the count yourself rather than quoting a reviewer's number verbatim.
 
 - **A "rescue floor" for a degenerate computed value is hard to get right on the first
   try.** An unconditional floor fixes the degenerate case but silently regresses any value
-  with real separation below the floor. Budget an extra review round for that boundary.
+  with real separation below the floor. Budget an extra review round for that boundary —
+  this was `gather-and-gate`'s `calibrate()` saga, not repeated on any branch since.
 
 ## Loose ends
 
-- **`jarvis/retriever.py`'s RRF cross-round fix has no real regression test** (see the
-  adversarial-review section above) — the one finding from step 7's review that was
-  deliberately parked rather than fixed. Worth a small dedicated task before the next
+- **`jarvis/retriever.py`'s RRF cross-round fix has no real regression test** (from
+  `compile-cited-qa`'s review) — still open. Worth a small dedicated task before the next
   change to that file: assert on fused *order*, not just on id-uniqueness or round count.
 - **`main` has a public remote and is being pushed to.** Flag any future push as the
   outbound, semi-irreversible action it is.
 - **One spec §10 metric is unclaimed by any remaining plan: cost per project.**
   `router.py`'s `CostTracker`/`ModelRouter` and the `runs.cost_usd` column both exist;
-  nothing writes measured usage into a run. The gather plan is the natural home for this
-  (wiring `ModelRouter.cost.total_cost` into `save_run` at the end of a gather run) —
-  small follow-up, not urgent.
-- **`jarvis.verify.quote_is_grounded`'s paper-level fallback (see caveats above) is a real,
-  pre-existing gap now more visible because of step 7.** Worth a dedicated small follow-up
-  plan/task against `verify.py` directly — not bundled into any existing plan.
-- **`LLMPlanner`, `LLMVoter`, `LLMCardExtractor`, `LLMRefiner`, and `LLMWriter`'s live
-  paths are tested against fakes only** — none has been exercised against a real model
-  endpoint yet. Deliberate deferral, not a gap, but worth knowing.
-- **This file is tracked on `main`** (as of the compile-cited-qa merge). `LEDGER.md`,
-  `LEDGER-gather-and-gate.md`, and `LEDGER-compile-cited-qa.md` remain the authoritative
-  per-branch records; this file is the cross-branch orientation layer, kept current at the
-  end of each branch's work.
+  nothing writes measured usage into a run. Small follow-up, not urgent.
+- **`jarvis.verify.quote_is_grounded`'s paper-level fallback** (see caveats above) is a
+  real, pre-existing gap, now inherited as-is by the new `verify_quote` MCP tool too.
+  Worth a dedicated small follow-up plan/task against `verify.py` directly.
+- **`list_papers`'s N+1 query pattern and missing total/has_more fields** (`mcp-server`'s
+  Finding 2, parked) — not urgent at current corpus sizes, worth revisiting if a corpus
+  large enough for either to matter in practice shows up.
+- **`FakeEmbedder`'s missing relevance floor** (see patterns above) — a fifth occurrence of
+  the same vacuous-test root cause. Worth adding an opt-in floor to the fixture directly if
+  a sixth branch hits it, rather than continuing to fix it test-by-test.
+- **`LLMPlanner`, `LLMVoter`, `LLMCardExtractor`, `LLMRefiner`, `LLMWriter`, and now the
+  `--with-models` path of `jarvis/mcp_server.py`'s `build_context`/`serve` are tested
+  against fakes/type-signatures only** — none has been exercised against a real model
+  endpoint, and `serve()` itself has never actually been run (the `mcp` package is not
+  installed in this environment). Deliberate deferral, not a gap, but worth knowing.
+- **This file is tracked on `main`**. `LEDGER.md`, `LEDGER-gather-and-gate.md`,
+  `LEDGER-compile-cited-qa.md`, and `LEDGER-mcp-server.md` (once merged) remain the
+  authoritative per-branch records; this file is the cross-branch orientation layer, kept
+  current at the end of each branch's work.
 
 ## Open questions the spec asks and the code has not yet answered
 
