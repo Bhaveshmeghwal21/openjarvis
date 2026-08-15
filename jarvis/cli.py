@@ -350,6 +350,14 @@ def _run_gather(conn, args: argparse.Namespace, config: Config, router,
               "costing more than search API calls)")
         return 0
 
+    deep_candidates = [c for c in candidates if decisions.get(c.pid) in KEPT]
+    if args.max_deep is not None and len(deep_candidates) > args.max_deep:
+        deferred = len(deep_candidates) - args.max_deep
+        deep_candidates = deep_candidates[:args.max_deep]
+        print(f"--max-deep {args.max_deep}: processing {len(deep_candidates)} now, "
+              f"{deferred} more stay queued at pending_deep for a later `gather` run "
+              f"on this project")
+
     try:
         parser = build_parser(config)
         embedder = build_embedder(config)
@@ -363,7 +371,7 @@ def _run_gather(conn, args: argparse.Namespace, config: Config, router,
         return fetch_pdf(candidate.paper, cache_dir, unpaywall_email=config.unpaywall_email or "",
                         paper_id=candidate.pid) or ""
 
-    results = ingest_decided(conn, decisions, candidates, parser, embedder,
+    results = ingest_decided(conn, decisions, deep_candidates, parser, embedder,
                              path_for=path_for)
     ok = [r for r in results if r.ok]
     bad = failed(results)
@@ -652,6 +660,12 @@ def _build_parser() -> argparse.ArgumentParser:
                                "budget parameter)")
     gather_p.add_argument("--limit", type=int, default=20,
                           help="max results per search query, per source")
+    gather_p.add_argument("--max-deep", type=int, default=None,
+                          help="cap how many kept papers get deep-read (fetch, parse, "
+                               "embed, extract cards) this run — the only real cost "
+                               "control until a project has a calibrated gate. Papers "
+                               "past the cap stay at pending_deep and are picked up by "
+                               "a later `gather` run on the same project.")
 
     ask_p = sub.add_parser("ask")
     _add_store_args(ask_p)

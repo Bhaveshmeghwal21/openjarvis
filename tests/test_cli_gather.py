@@ -227,3 +227,48 @@ def test_budget_flag_is_carried_into_gather(tmp_path, monkeypatch):
 
     main(["gather", "test question", "--project", "theta", "--yes", "--budget", "5"])
     assert captured.get("budget") == 5
+
+
+def test_max_deep_caps_how_many_kept_papers_are_actually_deep_read(
+    tmp_path, monkeypatch, capsys,
+):
+    # `_fake_search` returns 2 candidates crafted to both score as relevant, so both are
+    # expected to clear the gate -- capping at 1 must leave exactly 1 at `deep` depth and
+    # the other still recoverable at `pending_deep`, not silently dropped.
+    monkeypatch.setenv("JARVIS_PROJECT_ROOT", str(tmp_path))
+    calls = []
+    _patch_pipeline(monkeypatch, extractor_calls=calls)
+
+    exit_code = main(["gather", "test question", "--project", "iota", "--yes",
+                      "--max-deep", "1"])
+    assert exit_code == 0
+
+    conn = open_store(tmp_path / "iota" / "corpus.db")
+    deep = get_papers_by_depth(conn, "deep")
+    pending = get_papers_by_depth(conn, "pending_deep")
+    assert len(deep) == 1
+    assert len(pending) == 1
+    assert len(calls) == 1  # card extraction only ran for the one actually ingested
+
+    out = capsys.readouterr().out
+    assert "--max-deep 1" in out
+    assert "1 more" in out or "queued" in out
+
+
+def test_max_deep_unset_processes_every_kept_paper_unchanged(
+    tmp_path, monkeypatch,
+):
+    # No regression for the default (uncapped) path -- omitting --max-deep must behave
+    # exactly as it did before this flag existed.
+    monkeypatch.setenv("JARVIS_PROJECT_ROOT", str(tmp_path))
+    calls = []
+    _patch_pipeline(monkeypatch, extractor_calls=calls)
+
+    exit_code = main(["gather", "test question", "--project", "kappa", "--yes"])
+    assert exit_code == 0
+
+    conn = open_store(tmp_path / "kappa" / "corpus.db")
+    deep = get_papers_by_depth(conn, "deep")
+    pending = get_papers_by_depth(conn, "pending_deep")
+    assert len(pending) == 0
+    assert len(calls) == len(deep)
