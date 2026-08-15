@@ -13,6 +13,7 @@ installed.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import time
 import uuid
@@ -21,10 +22,20 @@ from pathlib import Path
 from jarvis.answer import ask, render_answer
 from jarvis.card import extract_and_verify
 from jarvis.config import Config
+from jarvis.contradict import (
+    apply_reviews,
+    rank,
+    read_reviews,
+    render_conflicts,
+    scan_corpus,
+    write_review_sheet,
+)
+from jarvis.evaluate import contradiction_precision
 from jarvis.fetch import fetch_pdf
 from jarvis.gate import screen
 from jarvis.gather import Candidate, gather, save_candidates
 from jarvis.ingest import failed, ingest_decided
+from jarvis.models import Claim
 from jarvis.report import corpus_cards, render_report, write_report
 from jarvis.router import ModelRouter
 from jarvis.sources import (
@@ -395,6 +406,104 @@ def cmd_report(conn, args: argparse.Namespace) -> int:
 
     if args.out:
         Path(args.out).write_text(rendered, encoding="utf-8")
+
+    _save_claims_sidecar(_reports_dir(args) / "latest.json", report.all_claims)
+    return 0
+
+
+def _reports_dir(args: argparse.Namespace) -> Path:
+    return Path(resolve_db_path(project=args.project, db=args.db)).parent / "reports"
+
+
+def _save_claims_sidecar(path: Path, claims) -> None:
+    """The claims a report's sections actually cited, as JSON next to its markdown.
+
+    There is no report-persistence layer anywhere else in this codebase --
+    `write_report` returns a `Report` held only in memory. Spec §9's own resolution
+    ("scan the claims from the most recent report") is unimplementable without this:
+    something has to leave a report's claims somewhere `jarvis contradictions` can find
+    them later. JSON, not markdown-parsing, because a claim's `unit_id`/`quote` need to
+    round-trip exactly, and rendered markdown deliberately drops verification detail for
+    flagged/blocked claims.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"claims": [
+        {"claim_id": c.claim_id, "text": c.text, "unit_id": c.unit_id, "quote": c.quote}
+        for c in claims
+    ]}
+    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+
+def _load_claims_sidecar(path: Path) -> list[Claim]:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    rows = data.get("claims") if isinstance(data, dict) else None
+    if not isinstance(rows, list):
+        return []
+    out = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        claim_id = str(row.get("claim_id", "") or "")
+        text = str(row.get("text", "") or "")
+        unit_id = str(row.get("unit_id", "") or "")
+        quote = str(row.get("quote", "") or "")
+        if claim_id and text and unit_id and quote:
+            out.append(Claim(claim_id=claim_id, text=text, unit_id=unit_id, quote=quote))
+    return out
+
+
+def cmd_contradictions(conn, args: argparse.Namespace) -> int:
+    """`scan_corpus()` -> `rank()` -> a review sheet and a human-readable queue.
+
+    Claims come from the most recent report, or `--from-report` (design spec §9 — the
+    spec's own least-confident decision). Scanning with no report available is a named
+    error, not an empty result — an empty scan and "there was nothing to scan" must never
+    look the same.
+    """
+    sidecar = Path(args.from_report) if args.from_report else _reports_dir(args) / "latest.json"
+    if not sidecar.is_file():
+        print(f"error: no report found at {sidecar} — run `jarvis report` first, or "
+              f"pass --from-report <path> to an existing one", file=sys.stderr)
+        return 1
+    claims = _load_claims_sidecar(sidecar)
+
+    config = Config.load()
+    try:
+        embedder = build_embedder(config)
+        nli = build_nli(config)
+    except ModelBuildError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    run_id = uuid.uuid4().hex[:12]
+    conflicts = scan_corpus(conn, claims, nli, embedder, run_id=run_id,
+                            budget=args.budget)
+    print(render_conflicts(conflicts))
+
+    sheet_path = Path(resolve_db_path(project=args.project, db=args.db)).parent \
+        / "reviews" / "contradictions.jsonl"
+    rows_written = write_review_sheet(sheet_path, rank(conflicts))
+    print(f"\nwrote {rows_written} candidate(s) to {sheet_path}")
+    return 0
+
+
+def cmd_review(conn, args: argparse.Namespace) -> int:
+    """`read_reviews()` -> `apply_reviews()` -> `contradiction_precision`, printed
+    against the 0.70 target. This is the command that finally produces the number the
+    entire build order has been blocked on (design spec §5, §6)."""
+    sheet = Path(args.sheet)
+    if not sheet.is_file():
+        print(f"error: review sheet not found: {sheet}", file=sys.stderr)
+        return 1
+
+    reviews = read_reviews(sheet)
+    applied = apply_reviews(conn, reviews)
+    print(f"applied {applied} review(s)")
+
+    precision = contradiction_precision(reviews)
+    print(f"contradiction precision: {precision:.1%} "
+          f"({'meets' if precision >= 0.70 else 'below'} the 0.70 target) "
+          f"over {len(reviews)} reviewed candidate(s)")
     return 0
 
 
@@ -403,6 +512,8 @@ COMMANDS = {
     "gather": cmd_gather,
     "ask": cmd_ask,
     "report": cmd_report,
+    "contradictions": cmd_contradictions,
+    "review": cmd_review,
 }
 
 
@@ -434,6 +545,19 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_store_args(report_p)
     report_p.add_argument("topic", help="the report topic")
     report_p.add_argument("--out", default=None, help="also write the rendered report here")
+
+    contradictions_p = sub.add_parser("contradictions")
+    _add_store_args(contradictions_p)
+    contradictions_p.add_argument("--from-report", default=None,
+                                  help="explicit path to a report's claims sidecar JSON "
+                                       "(default: this project's most recent report)")
+    contradictions_p.add_argument("--budget", type=int, default=500,
+                                  help="max candidates returned (scan_corpus()'s own "
+                                       "budget parameter)")
+
+    review_p = sub.add_parser("review")
+    _add_store_args(review_p)
+    review_p.add_argument("sheet", help="path to a reviewed contradictions.jsonl sheet")
 
     return parser
 
