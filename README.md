@@ -48,7 +48,7 @@ of fix and independent re-review, since the first fix attempt for a calibration-
 introduced its own regression that a second review caught before it shipped. See
 `LEDGER-gather-and-gate.md` for the full history.
 
-**Compile — cited Q&A (spec build step 7) is also complete**, on this branch: iterative
+**Compile — cited Q&A (spec build step 7) is also complete and merged to `main`**: iterative
 retrieval with cross-round RRF fusion, a hard evidence cap with primacy/recency ordering, a
 writer subagent emitting explicit claim triples, and mechanical verification that blocks
 fabricated citations outright and flags merely-uncertain ones. Also passed a final
@@ -60,8 +60,14 @@ and independently re-verified by mutation-testing two of them directly (temporar
 reverting each fix and confirming its regression test genuinely fails without it). See
 `LEDGER-compile-cited-qa.md` for the full history.
 
-MCP server, contradiction detection, and long-form reports (spec build steps 8–10) each have
-a complete implementation plan written (`docs/plans/2026-08-14-*.md`) but are not yet built.
+**MCP server (spec build step 8) is also complete**, on this branch: the corpus exposed as
+six tools (`corpus_search`, `get_unit`, `get_paper`, `list_papers`, `verify_quote`, `ask`)
+over a pure dispatcher with no protocol dependency, plus a thin stdio adapter so Claude
+Code, Cursor, or any other MCP client can query a corpus directly. See "Use it from Claude
+Code" below.
+
+Contradiction detection and long-form reports (spec build steps 9–10) each have a complete
+implementation plan written (`docs/plans/2026-08-14-*.md`) but are not yet built.
 
 Read the spec first: [`docs/specs/2026-08-11-research-corpus-agent-design.md`](docs/specs/2026-08-11-research-corpus-agent-design.md).
 Every non-obvious decision in it carries the measurement that drove it. Implementation plans:
@@ -94,6 +100,8 @@ Every non-obvious decision in it carries the measurement that drove it. Implemen
 | `jarvis/retriever.py` | Iterative retrieval: a `Refiner` proposes follow-up queries, fused across rounds by RRF |
 | `jarvis/writer.py` | Writer subagent: drafts an answer, emits explicit `(claim, unit_id, quote)` triples |
 | `jarvis/answer.py` | `ask()` — wires retrieve → cap → write → verify; blocks fabrications, flags uncertainty |
+| `jarvis/tools.py` | The corpus as callable tools — a pure dispatcher, no protocol dependency |
+| `jarvis/mcp_server.py` | stdio MCP adapter over `jarvis.tools` — translation only, no corpus logic |
 | `jarvis/sources.py` | Multi-source search (arXiv, S2, OpenAlex, Crossref, CORE, Unpaywall) + dedup + retraction check |
 | `jarvis/citation_graph.py` | Citation-graph traversal for recall |
 | `jarvis/scoring.py` | Cosine, recency, citation weighting |
@@ -112,7 +120,7 @@ branch with new source adapters and the retraction check. Everything else is new
 pip install -e ".[dev]"
 ```
 
-Optional extras, installed as each build step lands: `llm`, `parse`, `index`, `verify`.
+Optional extras, installed as each build step lands: `llm`, `parse`, `index`, `verify`, `mcp`.
 
 ## Test
 
@@ -134,6 +142,35 @@ Environment only; this project never reads `.env`.
 | `JARVIS_PROJECT_ROOT` | Where corpora live (default `~/.jarvis/projects`) |
 | `S2_API_KEY` | Semantic Scholar — raises rate limits, optional |
 | `UNPAYWALL_EMAIL` | Required by the Unpaywall API |
+
+## Use it from Claude Code
+
+Install the extra and point a client at a project's corpus:
+
+```bash
+pip install -e ".[mcp]"
+```
+
+Then add to your MCP client config (`.mcp.json` for Claude Code):
+
+```json
+{
+  "mcpServers": {
+    "jarvis-corpus": {
+      "command": "jarvis-mcp",
+      "args": ["--db", "/absolute/path/to/corpus.db"]
+    }
+  }
+}
+```
+
+Six tools become available: `corpus_search`, `get_unit`, `get_paper`, `list_papers`,
+`verify_quote`, and `ask`.
+
+`verify_quote` is the one that matters. It is a deterministic string match against the
+immutable parsed paper — no model, no cost — so an assistant can check a quotation before
+asserting it. Add `--with-models` to enable `ask`, which additionally needs a writer model
+and a local NLI model.
 
 ## Design in one page
 
