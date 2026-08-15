@@ -22,6 +22,110 @@ from jarvis.store import close_store, get_papers_by_depth, open_store
 DEPTHS = ("deep", "pending_deep", "metadata", "abstract")
 
 
+class ModelBuildError(RuntimeError):
+    """A model this subcommand needs could not be constructed.
+
+    Always names the exact missing environment variable or optional extra. Raised
+    instead of ever letting a subcommand fall through to a `Fake*` double -- silently
+    substituting a fake model in an operator tool would produce a corpus that looks real
+    and is not, the precise failure class this whole system exists to prevent (design
+    spec docs/specs/2026-08-15-cli-and-operations.md §7).
+    """
+
+
+def _require_chat_credentials(config: Config) -> None:
+    """`jarvis.llm.chat` reads `JARVIS_BASE_URL`/`JARVIS_API_KEY` from the environment
+    directly, not from a `Config` object -- checking `config`'s own copy of the same
+    values here (populated from the same environment by `Config.load()`) fails loud
+    before any `LLM*` class's own `try/except` around `chat_fn()` would otherwise
+    swallow the resulting `openai` error and quietly fall back to an empty/neutral
+    result that looks like "no evidence" rather than "misconfigured"."""
+    if not config.base_url:
+        raise ModelBuildError(
+            "JARVIS_BASE_URL is not set — required to construct a real model client"
+        )
+    if not config.api_key:
+        raise ModelBuildError(
+            "JARVIS_API_KEY is not set — required to construct a real model client"
+        )
+
+
+def _require_importable(module: str, extra: str) -> None:
+    """Fail naming the exact optional extra, not a bare `ModuleNotFoundError`."""
+    try:
+        __import__(module)
+    except ModuleNotFoundError as exc:
+        raise ModelBuildError(
+            f"{module!r} is not installed — run `pip install -e \".[{extra}]\"` "
+            f"to enable this command"
+        ) from exc
+
+
+def build_router(config: Config):
+    """Always constructible: no model call happens until `.route()`/`chat()` is used."""
+    from jarvis.router import ModelRouter
+    return ModelRouter(overrides=config.model_overrides)
+
+
+def build_writer(config: Config, router):
+    _require_chat_credentials(config)
+    from jarvis.writer import LLMWriter
+    return LLMWriter(router)
+
+
+def build_planner(config: Config, router):
+    _require_chat_credentials(config)
+    from jarvis.gather import LLMPlanner
+    return LLMPlanner(router)
+
+
+def build_voter(config: Config, router):
+    _require_chat_credentials(config)
+    from jarvis.gate import LLMVoter
+    return LLMVoter(router)
+
+
+def build_card_extractor(config: Config, router):
+    _require_chat_credentials(config)
+    from jarvis.card import LLMCardExtractor
+    return LLMCardExtractor(router)
+
+
+def build_refiner(config: Config, router):
+    _require_chat_credentials(config)
+    from jarvis.retriever import LLMRefiner
+    return LLMRefiner(router)
+
+
+def build_outliner(config: Config, router):
+    _require_chat_credentials(config)
+    from jarvis.outline import LLMOutliner
+    return LLMOutliner(router)
+
+
+def build_embedder(config: Config):
+    """`config` is accepted for a signature uniform with the other `build_*` helpers,
+    even though a `BGEEmbedder` needs no credentials -- only the extra installed."""
+    del config
+    _require_importable("sentence_transformers", "index")
+    from jarvis.embed import BGEEmbedder
+    return BGEEmbedder()
+
+
+def build_nli(config: Config):
+    del config
+    _require_importable("transformers", "verify")
+    from jarvis.verify import HFNLI
+    return HFNLI()
+
+
+def build_parser(config: Config):
+    del config
+    _require_importable("docling", "parse")
+    from jarvis.parse import DoclingParser
+    return DoclingParser()
+
+
 def resolve_db_path(*, project: str | None, db: str | None) -> Path:
     """Resolve the corpus db path for a subcommand. `--db` is an explicit override.
 
