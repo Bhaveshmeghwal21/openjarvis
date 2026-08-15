@@ -34,49 +34,32 @@ benchmarks are single-shot and don't reward a corpus you keep.
 
 ## Status
 
-**The verifiable single-paper core (spec build steps 1–5) is complete and merged to `main`.**
-Storage, parsing, typed evidence units, hybrid retrieval, and two-stage verification all
-exist, are tested end to end on a single paper, and passed a final whole-branch adversarial
-review.
+**All ten build steps of the design spec are complete and merged to `main`.** Storage,
+parsing, typed evidence units, hybrid retrieval, two-stage verification, multi-source
+gather with a calibrated gate, cited Q&A, an MCP server, contradiction detection, and
+long-form reports — each passed a final whole-branch adversarial review, several of which
+found and fixed real Critical defects (see the `LEDGER-*.md` files for the full history of
+each).
 
-**Gather + gate (spec build step 6) is also complete and merged to `main`**: multi-source
-search (arXiv, Semantic Scholar, OpenAlex, Crossref, CORE, Unpaywall) with citation-graph
-expansion, retraction checking, a calibrated union gate with no `exclude` outcome, Stage C
-deep-read into the corpus, and Layer 2 card extraction with mechanically verified quote
-bindings. Also passed a final whole-branch adversarial review — this one required two rounds
-of fix and independent re-review, since the first fix attempt for a calibration-floor bug
-introduced its own regression that a second review caught before it shipped. See
-`LEDGER-gather-and-gate.md` for the full history.
+**The CLI (`docs/specs/2026-08-15-cli-and-operations.md`) is also complete, on this
+branch**: `jarvis status/gather/ask/report/contradictions/review/calibrate/mcp` wire
+every one of those ten build steps into one operator surface, closing three real pipeline
+gaps found by reading the code rather than the plans — PDF acquisition (nothing
+downloaded or cached a source file before this), card extraction (exported and tested but
+never called by any production path), and measured cost (the column existed, nothing
+wrote to it). See "Quickstart" below and `LEDGER-cli.md` for the full history.
 
-**Compile — cited Q&A (spec build step 7) is also complete and merged to `main`**: iterative
-retrieval with cross-round RRF fusion, a hard evidence cap with primacy/recency ordering, a
-writer subagent emitting explicit claim triples, and mechanical verification that blocks
-fabricated citations outright and flags merely-uncertain ones. Also passed a final
-whole-branch adversarial review, which found a real Critical defect (a claim-id collision
-that could let a blocked claim's fabricated text render as if cited) plus four Important
-gaps — one about the branch's own Task 2 fix having no real regression test, closed by the
-controller reverting the fix and confirming the suite didn't notice; the other four fixed
-and independently re-verified by mutation-testing two of them directly (temporarily
-reverting each fix and confirming its regression test genuinely fails without it). See
-`LEDGER-compile-cited-qa.md` for the full history.
-
-**MCP server (spec build step 8) is also complete**, on this branch: the corpus exposed as
-six tools (`corpus_search`, `get_unit`, `get_paper`, `list_papers`, `verify_quote`, `ask`)
-over a pure dispatcher with no protocol dependency, plus a thin stdio adapter so Claude
-Code, Cursor, or any other MCP client can query a corpus directly. See "Use it from Claude
-Code" below.
-
-Contradiction detection and long-form reports (spec build steps 9–10) each have a complete
-implementation plan written (`docs/plans/2026-08-14-*.md`) but are not yet built.
-
-Read the spec first: [`docs/specs/2026-08-11-research-corpus-agent-design.md`](docs/specs/2026-08-11-research-corpus-agent-design.md).
-Every non-obvious decision in it carries the measurement that drove it. Implementation plans:
+Read the spec first: [`docs/specs/2026-08-11-research-corpus-agent-design.md`](docs/specs/2026-08-11-research-corpus-agent-design.md),
+then [`docs/specs/2026-08-15-cli-and-operations.md`](docs/specs/2026-08-15-cli-and-operations.md).
+Every non-obvious decision in either carries the measurement that drove it. Implementation
+plans:
 [steps 1–5](docs/plans/2026-08-11-verifiable-single-paper-core.md) ·
 [step 6 — gather + gate](docs/plans/2026-08-14-gather-and-gate.md) ·
 [step 7 — compile/Q&A](docs/plans/2026-08-14-compile-cited-qa.md) ·
 [step 8 — MCP server](docs/plans/2026-08-14-mcp-server.md) ·
 [step 9 — contradiction detection](docs/plans/2026-08-14-contradiction-detection.md) ·
-[step 10 — long-form reports](docs/plans/2026-08-14-longform-reports.md).
+[step 10 — long-form reports](docs/plans/2026-08-14-longform-reports.md) ·
+[CLI and operations](docs/specs/2026-08-15-cli-and-operations.md).
 
 | Module | Purpose |
 |---|---|
@@ -90,7 +73,7 @@ Every non-obvious decision in it carries the measurement that drove it. Implemen
 | `jarvis/index.py` | FTS5 keyword index — the BM25 half of hybrid retrieval |
 | `jarvis/retrieve.py` | Hybrid retrieval: RRF fusion, reranking, parent-unit expansion |
 | `jarvis/verify.py` | Two-stage verification: deterministic quote grounding + NLI entailment |
-| `jarvis/evaluate.py` | Evaluation metrics: quote fidelity, statement support, gate recall, coverage |
+| `jarvis/evaluate.py` | Evaluation metrics: quote fidelity, statement support, gate recall, coverage, contradiction precision |
 | `jarvis/gather.py` | Stage A: search plan, multi-source fan-out, citation-graph expansion |
 | `jarvis/gate.py` | Stage B: four independent signals, union decision, threshold calibration |
 | `jarvis/label.py` | Seed-set sampling and hand-label round-trip for gate calibration |
@@ -100,8 +83,13 @@ Every non-obvious decision in it carries the measurement that drove it. Implemen
 | `jarvis/retriever.py` | Iterative retrieval: a `Refiner` proposes follow-up queries, fused across rounds by RRF |
 | `jarvis/writer.py` | Writer subagent: drafts an answer, emits explicit `(claim, unit_id, quote)` triples |
 | `jarvis/answer.py` | `ask()` — wires retrieve → cap → write → verify; blocks fabrications, flags uncertainty |
+| `jarvis/outline.py` | Report outline built from Layer 2 cards |
+| `jarvis/report.py` | Section-by-section drafting, claim integration, coverage, markdown rendering |
+| `jarvis/contradict.py` | Cross-paper contradiction scan, ranking, human review round-trip |
 | `jarvis/tools.py` | The corpus as callable tools — a pure dispatcher, no protocol dependency |
 | `jarvis/mcp_server.py` | stdio MCP adapter over `jarvis.tools` — translation only, no corpus logic |
+| `jarvis/fetch.py` | PDF acquisition and local caching, with `%PDF` magic-byte verification |
+| `jarvis/cli.py` | The `jarvis` command — the operator surface over every stage above |
 | `jarvis/sources.py` | Multi-source search (arXiv, S2, OpenAlex, Crossref, CORE, Unpaywall) + dedup + retraction check |
 | `jarvis/citation_graph.py` | Citation-graph traversal for recall |
 | `jarvis/scoring.py` | Cosine, recency, citation weighting |
@@ -120,7 +108,11 @@ branch with new source adapters and the retraction check. Everything else is new
 pip install -e ".[dev]"
 ```
 
-Optional extras, installed as each build step lands: `llm`, `parse`, `index`, `verify`, `mcp`.
+Optional extras, needed as you use more of the pipeline: `llm` (writer/planner/voter/card
+extractor — anything that calls a model), `parse` (Docling), `index` (the real embedder),
+`verify` (the local NLI model), `mcp` (the MCP server). `jarvis <command>` names the exact
+missing extra and environment variable if one is needed and absent — it never silently
+substitutes a fake model.
 
 ## Test
 
@@ -129,6 +121,37 @@ python -m pytest
 ```
 
 All tests are offline — no network, no API keys, no model downloads.
+
+## Quickstart
+
+```bash
+pip install -e ".[llm,parse,index,verify]"
+export JARVIS_BASE_URL=https://api.openai.com/v1   # any OpenAI-compatible endpoint
+export JARVIS_API_KEY=sk-...
+export UNPAYWALL_EMAIL=you@example.com              # required by the Unpaywall fallback
+
+# Build a corpus. Pauses after screening to show what would be deep-read before
+# spending anything on parsing/embedding/card extraction -- pass --yes to proceed.
+jarvis gather "does retrieval augmentation reduce hallucination in long-form QA?" \
+  --project my-question
+
+jarvis gather "..." --project my-question --yes   # proceeds through deep reads
+
+jarvis status --project my-question               # paper counts by depth, cost so far
+
+jarvis ask "what evaluation metrics did these papers use?" --project my-question
+
+jarvis report "retrieval augmentation and hallucination" --project my-question --out report.md
+
+jarvis contradictions --project my-question        # scans the report just written
+jarvis review --project my-question reviews/contradictions.jsonl   # after hand-editing it
+
+jarvis calibrate --project my-question seed --run-id <run-id>   # gate calibration
+```
+
+Every corpus is one SQLite file at `$JARVIS_PROJECT_ROOT/<project>/corpus.db` (default
+`~/.jarvis/projects`). Re-running `jarvis gather` on the same project resumes rather than
+re-searching: papers already screened and waiting for a deep read pick up right there.
 
 ## Configuration
 
@@ -163,6 +186,10 @@ Then add to your MCP client config (`.mcp.json` for Claude Code):
   }
 }
 ```
+
+(`jarvis mcp` works identically as a subcommand of the main CLI, for anyone who prefers
+one entry point; `jarvis-mcp` keeps working unchanged for existing configs like the one
+above.)
 
 Six tools become available: `corpus_search`, `get_unit`, `get_paper`, `list_papers`,
 `verify_quote`, and `ask`.

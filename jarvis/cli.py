@@ -652,6 +652,11 @@ def _build_parser() -> argparse.ArgumentParser:
     progress_p = calibrate_sub.add_parser("progress")
     progress_p.add_argument("sheet", help="path to a label sheet in progress")
 
+    sub.add_parser(
+        "mcp", help="alias for jarvis-mcp — every remaining argument is passed through "
+                    "to it unchanged (handled before this parser sees them; see main())"
+    )
+
     return parser
 
 
@@ -663,6 +668,19 @@ def _add_store_args(parser: argparse.ArgumentParser) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else list(argv)
+
+    if argv and argv[0] == "mcp":
+        # Delegates entirely to mcp_server.main, which parses its own --db/--with-models
+        # and manages its own store lifecycle (build_context/serve) -- this command never
+        # opens a store itself, unlike every other subcommand. Handled before argparse
+        # ever sees the remaining args: argparse.REMAINDER on a subparser does not
+        # reliably capture leading `--flag`-shaped tokens (confirmed directly -- it
+        # raised "unrecognized arguments: --db" here), so mcp's own args must never
+        # reach this module's parser at all.
+        from jarvis.mcp_server import main as mcp_main
+        return mcp_main(argv[1:])
+
     parser = _build_parser()
     args = parser.parse_args(argv)
 
