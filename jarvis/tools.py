@@ -74,7 +74,7 @@ def clamp_limit(value, default: int, maximum: int) -> int:
     """Coerce a client-supplied limit into a sane integer. Never trust the other side."""
     try:
         n = int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return default
     return max(1, min(n, maximum))
 
@@ -308,7 +308,8 @@ register(ToolSpec(
         "drafts an answer, then mechanically verifies every claim: claims whose quote is "
         "not in the source are REMOVED from the answer and reported only as a count in "
         "`blocked`; claims that ground but do not clearly entail appear in `flagged`. "
-        "Everything in `claims` has been verified. Requires a configured writer model."
+        "Everything in `claims` has been verified. Requires a configured writer model "
+        "and a configured NLI model."
     ),
     schema={
         "type": "object",

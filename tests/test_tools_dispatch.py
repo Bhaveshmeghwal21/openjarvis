@@ -89,6 +89,17 @@ def test_the_dispatcher_never_mutates_the_callers_arguments(ctx):
     assert args == {"query": "x"}
 
 
+def test_clamp_limit_survives_an_infinite_float():
+    # Final whole-branch adversarial review, Finding 3: int(float("inf")) raises
+    # OverflowError, which the original except (TypeError, ValueError) missed. The
+    # no-raise contract still held end-to-end via call_tool's own outer try/except, but
+    # clamp_limit's own docstring claims to "never trust the other side" -- this closes
+    # the gap at the source rather than relying only on the outer defense-in-depth layer.
+    from jarvis.tools import clamp_limit
+    assert clamp_limit(float("inf"), default=8, maximum=25) == 8
+    assert clamp_limit(float("-inf"), default=8, maximum=25) == 8
+
+
 def test_tools_module_does_not_import_mcp():
     import inspect
 
