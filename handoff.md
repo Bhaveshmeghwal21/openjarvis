@@ -16,7 +16,8 @@ main:  4edbb3f (steps 1-10), pushed, in sync with origin
 
 | What | Where |
 |---|---|
-| The design spec — read this first | `docs/specs/2026-08-11-research-corpus-agent-design.md` |
+| **The next work: CLI + operations spec** — no plan written yet | `docs/specs/2026-08-15-cli-and-operations.md` |
+| The original design spec — read this first for context | `docs/specs/2026-08-11-research-corpus-agent-design.md` |
 | Completed plan, steps 1-5 | `docs/plans/2026-08-11-verifiable-single-paper-core.md` |
 | Completed plan, step 6 | `docs/plans/2026-08-14-gather-and-gate.md` |
 | Completed plan, step 7 | `docs/plans/2026-08-14-compile-cited-qa.md` |
@@ -145,10 +146,12 @@ corpus, target ≥0.70 (ContraCrow parity) — is not yet measured.** No real
 most important open question the whole spec build leaves behind, and it requires a real
 corpus plus real human review time to answer — no amount of further code closes it.
 
-## There are no remaining implementation plans
+## There are no remaining implementation plans (but there is a new spec)
 
-All ten spec build steps have a complete implementation, merged, pushed, and independently
-verified.
+All ten of the *original* design spec's build steps have a complete implementation,
+merged, pushed, and independently verified. `docs/specs/2026-08-15-cli-and-operations.md`
+defines the next body of work and has **no implementation plan yet** — writing one is the
+first task for whoever picks this up.
 
 | # | Plan | Spec step | Tasks | Status |
 |---|---|---|---|---|
@@ -158,23 +161,56 @@ verified.
 | 4 | `2026-08-14-longform-reports.md` | 10 | 6 | done, merged, pushed |
 | 5 | `2026-08-14-contradiction-detection.md` | 9 | 5 | done, merged, pushed |
 
-## What comes next
+## What comes next — READ THIS FIRST IF YOU ARE PICKING THIS UP
 
 Nothing in `docs/specs/2026-08-11-research-corpus-agent-design.md`'s build order (§13)
-remains unbuilt. What's left is measurement and hardening, not new implementation:
+remains unbuilt. **But the system cannot be run**, and that is now the top priority.
 
-1. **Run a real gather on a real research question** and see whether the whole pipeline
-   holds up past test fixtures — this is the first time any of steps 6-10 will run against
-   more than a handful of hand-built papers.
-2. **Measure contradiction precision on that real corpus** against the 70% target — the
-   one number this entire spec build order has been unable to produce without a real
-   corpus to run it over.
-3. Work through the **Loose ends** list below — none of it is spec-build work, all of it
-   is real.
+**There is a new spec for the next body of work:
+[`docs/specs/2026-08-15-cli-and-operations.md`](docs/specs/2026-08-15-cli-and-operations.md).**
+Read it before doing anything else. It is a design spec, not an implementation plan — the
+plan still needs writing (see "How to execute a plan" below, and
+`superpowers:writing-plans`).
 
-If any of this turns into new implementation work with its own plan document, the process
-below still applies in full — worktree, pre-flight scan, TDD, final adversarial review,
-explicit confirmation before merge. Nothing about reaching step 10 changes that.
+The short version of why it exists: `pyproject.toml` declares exactly one entry point,
+`jarvis-mcp`, and it is deliberately read-only. Every pipeline stage exists as a library
+function; nothing wires them together. **No corpus has ever been built** —
+`~/.jarvis/projects` does not exist on this machine, so `jarvis-mcp` has no `--db` to
+point at. Every remaining open question (contradiction precision vs. the 70% target, gate
+calibration transfer, reranker choice, cost per project) is blocked behind that.
+
+**Three real pipeline gaps were found by reading the code while writing that spec** — none
+of them appear in any plan or ledger, and each blocks a real run:
+
+1. **No PDF acquisition step exists.** `ingest_decided`'s default `path_for` resolves to
+   `paper["pdf_url"]` — a URL — and hands it to `DoclingParser.parse`, which passes it to
+   `DocumentConverter().convert(path)`. Nothing downloads, caches, or retries. Whether
+   Docling resolves a remote URL is *unverified* — every test uses `FakeParser`.
+2. **Card extraction is never called outside tests.** `extract_and_verify` is exported and
+   tested but wired into no production path, while `write_report` builds its outline from
+   `corpus_cards(conn)`. On a real gathered corpus, every report would come out empty, and
+   it would look like a report bug.
+3. **Nothing writes `runs.cost_usd`.** `save_run` accepts it, `ModelRouter` tracks it, no
+   code connects them.
+
+Recommended order, per that spec's §10: project resolution + `jarvis status` → PDF fetch
+and cache → `jarvis gather` (with the confirmation gate, card extraction, and cost
+logging) → `ask`/`report` → `contradictions`/`review` → `calibrate`. The first three
+unblock everything; the rest are thin wrappers over merged, reviewed code.
+
+**Two decisions were made without a ruling** and are documented in that spec's §4 — one
+`jarvis` command with subcommands, and `gather` pausing for confirmation before deep reads.
+Both are cheap to overrule before implementation starts; neither should be discovered
+silently mid-build.
+
+**Deliberately sequenced *after* the first real gather, not before:** HTTP/SSE MCP
+transport (worthwhile, but it would serve a corpus that doesn't exist), and any web UI
+(the design spec §3 rules it out for v1 — "CLI and MCP only", "no server").
+
+After that, the measurement work the whole build order has been blocked on: run a real
+gather, then measure contradiction precision against the 70% target. Expect the first live
+run to be a debugging exercise rather than a measurement — every `LLM*` class has only
+ever run against fakes.
 
 ## How to execute a plan (kept for reference — none currently exist)
 
@@ -281,10 +317,14 @@ explicit confirmation before merge. Nothing about reaching step 10 changes that.
 
 ## Loose ends
 
+- **The system has no operator surface — nothing can be run.** Now covered by
+  `docs/specs/2026-08-15-cli-and-operations.md`; see "What comes next" above. Includes
+  three previously-unrecorded pipeline gaps (no PDF acquisition, card extraction never
+  called outside tests, nothing writes `runs.cost_usd`).
 - **The one number this entire spec build order has never been able to produce: measured
   contradiction precision on a real corpus.** See "The contradiction-detection adversarial
   review" above. No amount of further code closes this — it needs a real gather run and
-  real human review time.
+  real human review time, both blocked on the CLI above.
 - **`jarvis/retriever.py`'s RRF cross-round fix has no real regression test** — still open.
 - **`main` has a public remote and is being pushed to.** Flag any future push as the
   outbound, semi-irreversible action it is — see the Gotchas entry about confirmation.
