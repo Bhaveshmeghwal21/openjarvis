@@ -39,18 +39,29 @@ Storage, parsing, typed evidence units, hybrid retrieval, and two-stage verifica
 exist, are tested end to end on a single paper, and passed a final whole-branch adversarial
 review.
 
-**Gather + gate (spec build step 6) is also complete**, on this branch: multi-source search
-(arXiv, Semantic Scholar, OpenAlex, Crossref, CORE, Unpaywall) with citation-graph expansion,
-retraction checking, a calibrated union gate with no `exclude` outcome, Stage C deep-read
-into the corpus, and Layer 2 card extraction with mechanically verified quote bindings. Also
-passed a final whole-branch adversarial review — this one required two rounds of fix and
-independent re-review, since the first fix attempt for a calibration-floor bug introduced its
-own regression that a second review caught before it shipped. See `LEDGER-gather-and-gate.md`
-for the full history.
+**Gather + gate (spec build step 6) is also complete and merged to `main`**: multi-source
+search (arXiv, Semantic Scholar, OpenAlex, Crossref, CORE, Unpaywall) with citation-graph
+expansion, retraction checking, a calibrated union gate with no `exclude` outcome, Stage C
+deep-read into the corpus, and Layer 2 card extraction with mechanically verified quote
+bindings. Also passed a final whole-branch adversarial review — this one required two rounds
+of fix and independent re-review, since the first fix attempt for a calibration-floor bug
+introduced its own regression that a second review caught before it shipped. See
+`LEDGER-gather-and-gate.md` for the full history.
 
-Compile (Q&A), MCP server, contradiction detection, and long-form reports (spec build steps
-7–10) each have a complete implementation plan written (`docs/plans/2026-08-14-*.md`) but are
-not yet built.
+**Compile — cited Q&A (spec build step 7) is also complete**, on this branch: iterative
+retrieval with cross-round RRF fusion, a hard evidence cap with primacy/recency ordering, a
+writer subagent emitting explicit claim triples, and mechanical verification that blocks
+fabricated citations outright and flags merely-uncertain ones. Also passed a final
+whole-branch adversarial review, which found a real Critical defect (a claim-id collision
+that could let a blocked claim's fabricated text render as if cited) plus four Important
+gaps — one about the branch's own Task 2 fix having no real regression test, closed by the
+controller reverting the fix and confirming the suite didn't notice; the other four fixed
+and independently re-verified by mutation-testing two of them directly (temporarily
+reverting each fix and confirming its regression test genuinely fails without it). See
+`LEDGER-compile-cited-qa.md` for the full history.
+
+MCP server, contradiction detection, and long-form reports (spec build steps 8–10) each have
+a complete implementation plan written (`docs/plans/2026-08-14-*.md`) but are not yet built.
 
 Read the spec first: [`docs/specs/2026-08-11-research-corpus-agent-design.md`](docs/specs/2026-08-11-research-corpus-agent-design.md).
 Every non-obvious decision in it carries the measurement that drove it. Implementation plans:
@@ -79,6 +90,10 @@ Every non-obvious decision in it carries the measurement that drove it. Implemen
 | `jarvis/label.py` | Seed-set sampling and hand-label round-trip for gate calibration |
 | `jarvis/ingest.py` | Stage C: deep read into the corpus with per-paper failure isolation |
 | `jarvis/card.py` | Layer 2 card extraction with mechanically verified quote bindings |
+| `jarvis/evidence.py` | Hard cap on evidence units per synthesis call, primacy/recency ordering |
+| `jarvis/retriever.py` | Iterative retrieval: a `Refiner` proposes follow-up queries, fused across rounds by RRF |
+| `jarvis/writer.py` | Writer subagent: drafts an answer, emits explicit `(claim, unit_id, quote)` triples |
+| `jarvis/answer.py` | `ask()` — wires retrieve → cap → write → verify; blocks fabrications, flags uncertainty |
 | `jarvis/sources.py` | Multi-source search (arXiv, S2, OpenAlex, Crossref, CORE, Unpaywall) + dedup + retraction check |
 | `jarvis/citation_graph.py` | Citation-graph traversal for recall |
 | `jarvis/scoring.py` | Cosine, recency, citation weighting |
