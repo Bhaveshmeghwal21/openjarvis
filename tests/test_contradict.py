@@ -1,4 +1,6 @@
 """Cross-paper contradiction candidates (spec §8)."""
+from dataclasses import FrozenInstanceError
+
 import pytest
 
 from jarvis.context import TemplatePrefix, apply_prefixes
@@ -91,3 +93,104 @@ def test_the_limit_is_respected(corpus):
 def test_results_are_deduplicated(corpus):
     units = opposing_units(corpus, _claim(corpus), FakeEmbedder(), limit=20)
     assert len({u.unit_id for u in units}) == len(units)
+
+
+
+from jarvis.contradict import Conflict, rank, scan_claim, scan_corpus
+from jarvis.store import get_contradictions
+from jarvis.verify import FakeNLI
+
+CONTRADICTS = FakeNLI(default={"entailment": 0.02, "neutral": 0.08, "contradiction": 0.90})
+AGREES_NLI = FakeNLI(default={"entailment": 0.90, "neutral": 0.08, "contradiction": 0.02})
+
+
+def test_a_scan_finds_the_disagreeing_paper(corpus):
+    conflicts = scan_claim(corpus, _claim(corpus), CONTRADICTS, FakeEmbedder())
+    assert conflicts
+    assert all(c.paper_id == "p2" for c in conflicts)
+    assert conflicts[0].score == pytest.approx(0.90)
+
+
+def test_a_conflict_carries_enough_context_to_review_it(corpus):
+    conflict = scan_claim(corpus, _claim(corpus), CONTRADICTS, FakeEmbedder())[0]
+    assert conflict.claim_text.startswith("The controller reaches")
+    assert conflict.claim_paper_id == "p1"
+    assert conflict.paper_id == "p2"
+    assert conflict.evidence
+
+
+def test_agreement_produces_no_candidates(corpus):
+    assert scan_claim(corpus, _claim(corpus), AGREES_NLI, FakeEmbedder()) == []
+
+
+def test_the_threshold_gates_what_is_reported(corpus):
+    weak = FakeNLI(default={"entailment": 0.1, "neutral": 0.5, "contradiction": 0.40})
+    assert scan_claim(corpus, _claim(corpus), weak, FakeEmbedder(), threshold=0.5) == []
+    assert scan_claim(corpus, _claim(corpus), weak, FakeEmbedder(), threshold=0.3) != []
+
+
+def test_conflicts_come_back_most_confident_first():
+    conflicts = [
+        Conflict("c1", "t", "p1", "u1", "p2", 0.6, "e"),
+        Conflict("c1", "t", "p1", "u2", "p3", 0.9, "e"),
+        Conflict("c1", "t", "p1", "u3", "p4", 0.7, "e"),
+    ]
+    assert [c.score for c in rank(conflicts)] == [0.9, 0.7, 0.6]
+
+
+def test_ranking_deduplicates_a_repeated_pair_keeping_the_higher_score():
+    conflicts = [Conflict("c1", "t", "p1", "u1", "p2", 0.6, "e"),
+                 Conflict("c1", "t", "p1", "u1", "p2", 0.9, "e")]
+    ranked = rank(conflicts)
+    assert len(ranked) == 1
+    assert ranked[0].score == pytest.approx(0.9)
+
+
+def test_a_corpus_scan_covers_every_claim(corpus):
+    unit1 = next(u for u in get_units(corpus, "p1") if "94.2" in u.verbatim_text)
+    unit2 = next(u for u in get_units(corpus, "p1") if "12 m/s" in u.verbatim_text)
+    claims = [
+        Claim("c1", "It reaches 94.2% accuracy.", unit1.unit_id, "94.2% tracking accuracy"),
+        Claim("c2", "It degrades above 12 m/s.", unit2.unit_id, "above 12 m/s"),
+    ]
+    conflicts = scan_corpus(corpus, claims, CONTRADICTS, FakeEmbedder())
+    assert {c.claim_id for c in conflicts} == {"c1", "c2"}
+
+
+def test_a_corpus_scan_persists_its_candidates(corpus):
+    unit = next(u for u in get_units(corpus, "p1") if "94.2" in u.verbatim_text)
+    claims = [Claim("c1", "It reaches 94.2%.", unit.unit_id, "94.2% tracking accuracy")]
+    scan_corpus(corpus, claims, CONTRADICTS, FakeEmbedder(), run_id="scan1")
+
+    stored = get_contradictions(corpus, "scan1")
+    assert stored
+    assert stored[0]["claim_id"] == "c1"
+    assert stored[0]["reviewed"] == ""
+
+
+def test_a_scan_without_a_run_id_does_not_persist(corpus):
+    unit = next(u for u in get_units(corpus, "p1") if "94.2" in u.verbatim_text)
+    claims = [Claim("c1", "It reaches 94.2%.", unit.unit_id, "94.2% tracking accuracy")]
+    conflicts = scan_corpus(corpus, claims, CONTRADICTS, FakeEmbedder())
+    assert conflicts
+    assert get_contradictions(corpus, "") == []
+
+
+def test_the_budget_caps_the_scan(corpus):
+    unit = next(u for u in get_units(corpus, "p1") if "94.2" in u.verbatim_text)
+    claims = [Claim(f"c{i}", "It reaches 94.2%.", unit.unit_id, "94.2% tracking accuracy")
+              for i in range(20)]
+    assert len(scan_corpus(corpus, claims, CONTRADICTS, FakeEmbedder(), budget=3)) <= 3
+
+
+def test_one_bad_claim_does_not_abort_the_scan(corpus):
+    unit = next(u for u in get_units(corpus, "p1") if "94.2" in u.verbatim_text)
+    claims = [Claim("bad", "x", "ghost-unit", "q"),
+              Claim("good", "It reaches 94.2%.", unit.unit_id, "94.2% tracking accuracy")]
+    conflicts = scan_corpus(corpus, claims, CONTRADICTS, FakeEmbedder())
+    assert {c.claim_id for c in conflicts} == {"good"}
+
+
+def test_conflict_is_frozen():
+    with pytest.raises(FrozenInstanceError):
+        Conflict("c1", "t", "p1", "u1", "p2", 0.6, "e").score = 1.0
