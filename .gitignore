@@ -9,6 +9,7 @@ venv/
 .ruff_cache/
 .worktrees/
 .superpowers/
+.dev-local/
 
 # Never commit secrets or config holding keys
 .env
