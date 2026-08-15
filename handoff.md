@@ -1,48 +1,49 @@
 # Handoff — jarvis
 
-Updated 2026-08-15 (tenth update). Supersedes the prior version, which described the CLI
-spec as fully designed but not yet built.
+Updated 2026-08-15 (eleventh update). Supersedes the prior version, which described the
+CLI as complete but unmerged. It is now merged to `main` and pushed. **The system can be
+run for the first time in this project's history.**
 
-**State in one line:** all ten spec build steps plus the CLI (`docs/specs/2026-08-15-cli-and-operations.md`)
-are complete. The CLI is on branch `cli-and-operations`, tested, adversarially reviewed,
-fixed, **not yet merged.** Once it merges, the system can be run for the first time.
+**State in one line:** all ten spec build steps plus the CLI
+(`docs/specs/2026-08-15-cli-and-operations.md`) are on `main` and pushed. There is no
+remaining implementation work. The next milestone is the first real gather run — see "What
+comes next" below.
 
 ## Orient yourself in 60 seconds
 
 ```
-main:                997a1a4 (all 10 spec steps), pushed, in sync with origin
-cli-and-operations:  branched from 997a1a4, HEAD at 817a5e2, NOT YET MERGED
+main:  19c6209 (all 10 spec steps + CLI), pushed, in sync with origin
 ```
 
 | What | Where |
 |---|---|
 | The CLI spec | `docs/specs/2026-08-15-cli-and-operations.md` |
 | The original design spec | `docs/specs/2026-08-11-research-corpus-agent-design.md` |
-| Record of the CLI's build + review (on `cli-and-operations`, unmerged) | `LEDGER-cli.md` |
+| Record of the CLI's build + review | `LEDGER-cli.md` (on `main`) |
 | Records of all 10 spec build steps' build + review | `LEDGER.md`, `LEDGER-gather-and-gate.md`, `LEDGER-compile-cited-qa.md`, `LEDGER-mcp-server.md`, `LEDGER-contradiction-detection.md`, `LEDGER-longform-reports.md` (all on `main`) |
 
 ```
 main:
-  HEAD:   997a1a4  docs: full CLI task breakdown in handoff, executable in one pass
-  tests:  569 passing
+  HEAD:   19c6209  merge: CLI and operations (docs/specs/2026-08-15-cli-and-operations.md)
+  tests:  631 passing
   ruff:   11 pre-existing violations, zero new
   remote: origin -> https://github.com/Bhaveshmeghwal21/openjarvis (public), pushed, in sync
-
-cli-and-operations (unmerged):
-  HEAD:   817a5e2  docs: ledger for cli-and-operations
-  tests:  631 passing (569 baseline + 62 new)
-  ruff:   still exactly 11 pre-existing violations, zero new
 ```
 
 ## What changed since the last handoff
 
-**The CLI (`docs/specs/2026-08-15-cli-and-operations.md`) was fully executed** on a new
-worktree and branch, in one continuous session: all 8 plan tasks implemented directly, a
-final whole-branch adversarial review, a fix wave, a rigorous self-mutation-test in place
-of a full independent re-review (justified since no Critical finding occurred), and a
-ledger. Not yet merged.
+**`cli-and-operations` was merged into `main` and pushed.** Verified independently rather
+than taken on trust before merging: full suite re-run on the branch (631 passing, exit 0)
+and again on `main` itself after the merge (631 passing, exit 0, no conflicts), `ruff
+check .` at the 11-violation baseline, and the ledger's specific claims spot-checked
+directly against the actual code — the `%PDF` magic-byte check really is in `fetch.py`,
+`cost_usd` really is written via `router.cost.total_cost` in a `finally`, `extract_and_verify`
+really is called from `cmd_gather`, both Important fixes (whitespace-credential stripping,
+`--project` path-traversal containment) really are in place, and `scan_corpus`'s existing
+`_dedupe_claim_ids` guard really does cover claims loaded from the new JSON sidecar. The
+merged worktree and local branch were removed afterward.
 
-**The system can now be operated end to end from one command, `jarvis`**, once merged:
+**The system can now be operated end to end from one command, `jarvis`**:
 `jarvis status/gather/ask/report/contradictions/review/calibrate/mcp`. Three real pipeline
 gaps found by reading the code (not the plans) were closed as part of this build:
 
@@ -83,12 +84,12 @@ check it directly, the way a pre-flight scan checks every other interface assump
 ## What is built
 
 All ten of the original design spec's build steps, plus the CLI operator surface over all
-of them (unmerged).
+of them. **All on `main`.**
 
 | Component | Status | Modules |
 |---|---|---|
 | Spec build steps 1-10 | done, `main` | see prior handoff versions / `LEDGER*.md` files on `main` |
-| CLI (spec `2026-08-15-cli-and-operations.md`) | **done, `cli-and-operations`, unmerged** | `cli.py`, `fetch.py` |
+| CLI (spec `2026-08-15-cli-and-operations.md`) | **done, `main`** | `cli.py`, `fetch.py` |
 
 ## The CLI's adversarial review — worth reading in full before touching cli.py or fetch.py
 
@@ -123,26 +124,24 @@ Important, 2 Minor findings, all independently reproduced live:
 
 ## There are no remaining implementation plans
 
-Both the original ten-step design spec and the CLI spec have complete implementations.
-Nothing else is currently planned. What comes next is the measurement work the whole
-build order has been blocked on — see below.
+Both the original ten-step design spec and the CLI spec have complete implementations, all
+merged and pushed. Nothing else is currently planned. What comes next is the measurement
+work the whole build order has been blocked on — see below.
 
 ## What comes next — READ THIS FIRST IF YOU ARE PICKING THIS UP
 
-1. **Merge `cli-and-operations` to `main`**, with explicit go-ahead (see "How to execute
-   a plan" below — the rule applies exactly as it always has, regardless of how many
-   prior branches merged cleanly).
-2. **Run a real gather on a real research question.** This is the system's first live
+1. **Run a real gather on a real research question.** This is the system's first live
    run of any kind. Every `LLM*` class (`LLMPlanner`, `LLMVoter`, `LLMCardExtractor`,
    `LLMRefiner`, `LLMWriter`, `LLMOutliner`), `BGEEmbedder`, `HFNLI`, and `DoclingParser`
    has only ever been exercised against fakes or type signatures. Expect this to be a
    debugging exercise, not a measurement (the CLI spec's own risk table says so
-   explicitly). Start with a small `--budget` and `--limit`.
-3. **Once a real corpus exists, measure contradiction precision against the 0.70 target**
+   explicitly). Start with a small `--budget` and `--limit`:
+   `jarvis gather "<question>" --project <name> --budget 20 --limit 10`.
+2. **Once a real corpus exists, measure contradiction precision against the 0.70 target**
    (`jarvis contradictions` then `jarvis review` then read the printed number) — the one
    metric the entire spec build order has never been able to produce without a real
    corpus. This is the single most important open question left in this whole project.
-4. **Work through the Loose ends list below** — none of it is spec-build or CLI-build
+3. **Work through the Loose ends list below** — none of it is spec-build or CLI-build
    work, all of it is real, and some of it may become more urgent once a real corpus
    exists (e.g. `jarvis.verify.quote_is_grounded`'s paper-level fallback).
 
