@@ -13,8 +13,11 @@ evidence capping, retrieval refinement, deterministic quote verification, and en
 filtering. MCP server (spec step 8) is now also complete: the corpus exposed as tools
 (`corpus_search`, `get_unit`, `get_paper`, `list_papers`, `verify_quote`, `ask`) over a
 pure dispatcher in `jarvis.tools`, with a thin stdio adapter in `jarvis.mcp_server`
-(imports `mcp` lazily, not exported from this package). Contradiction detection and
-long-form reports (spec steps 9-10) are not yet built.
+(imports `mcp` lazily, not exported from this package). Long-form reports (spec step 10)
+is now also complete: `jarvis.outline` builds a report outline from Layer 2 cards, and
+`jarvis.report` drafts each section against its own bounded evidence set, integrates
+claims across sections, assembles the report, measures corpus coverage, and renders it
+to markdown with references. Contradiction detection (spec step 9) is not yet built.
 """
 from __future__ import annotations
 
@@ -76,7 +79,26 @@ from jarvis.models import (
     Verdict,
     Verification,
 )
+from jarvis.outline import (
+    LLMOutliner,
+    Outline,
+    Outliner,
+    Section,
+    TemplateOutliner,
+    cards_digest,
+)
 from jarvis.parse import DoclingParser, FakeParser
+from jarvis.report import (
+    Report,
+    SectionDraft,
+    corpus_cards,
+    draft_section,
+    duplicate_claims,
+    evaluate_report,
+    integrate,
+    render_report,
+    write_report,
+)
 from jarvis.retrieve import CrossEncoderReranker, rrf, search
 from jarvis.retriever import FakeRefiner, LLMRefiner, Refiner, Retrieval, retrieve_iteratively
 from jarvis.router import CostTracker, ModelRouter
@@ -146,17 +168,24 @@ __all__ = [
     "FakeWriter",
     "IngestResult",
     "LLMCardExtractor",
+    "LLMOutliner",
     "LLMPlanner",
     "LLMRefiner",
     "LLMVoter",
     "LLMWriter",
     "ModelRouter",
+    "Outline",
+    "Outliner",
     "Paper",
     "ParsedPaper",
     "Refiner",
+    "Report",
     "Retrieval",
     "SearchPlan",
+    "Section",
+    "SectionDraft",
     "Signals",
+    "TemplateOutliner",
     "TemplatePlanner",
     "TemplatePrefix",
     "Thresholds",
@@ -176,17 +205,22 @@ __all__ = [
     "calibration_report",
     "call_tool",
     "cap",
+    "cards_digest",
     "citation_precision",
     "citation_recall",
     "citation_weight",
     "claims_from_json",
     "close_store",
     "combine_sources",
+    "corpus_cards",
     "cosine",
     "decide",
     "dedup_papers",
+    "draft_section",
+    "duplicate_claims",
     "embedding_text",
     "enrich_provenance",
+    "evaluate_report",
     "expand_citations",
     "extract_and_verify",
     "failed",
@@ -202,6 +236,7 @@ __all__ = [
     "index_units_fts",
     "ingest_decided",
     "ingest_paper",
+    "integrate",
     "keyword_search",
     "make_arxiv_search",
     "make_core_search",
@@ -223,6 +258,7 @@ __all__ = [
     "read_labels",
     "recency",
     "render_answer",
+    "render_report",
     "report",
     "retrieve_iteratively",
     "rrf",
@@ -244,4 +280,5 @@ __all__ = [
     "verify_card",
     "verify_claim",
     "write_label_sheet",
+    "write_report",
 ]
