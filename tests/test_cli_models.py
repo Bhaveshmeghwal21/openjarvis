@@ -136,3 +136,64 @@ def test_no_missing_model_path_ever_returns_a_fake_instead_of_raising():
         build_voter(_cfg(), build_router(_cfg()))
     with pytest.raises(ModelBuildError):
         build_card_extractor(_cfg(), build_router(_cfg()))
+
+
+# --- provider-aware credential checks -----------------------------------------------
+# A task routed to `azure` or `gcp` needs different environment variables than the
+# `openai` default -- the fail-loud check has to know which provider a task actually
+# uses, not assume every task needs JARVIS_BASE_URL/JARVIS_API_KEY.
+
+def test_azure_provider_requires_api_version_in_addition_to_base_url_and_key():
+    cfg = _cfg(base_url="https://x.openai.azure.com/", api_key="k", provider="azure")
+    with pytest.raises(ModelBuildError, match="JARVIS_API_VERSION"):
+        build_writer(cfg, build_router(cfg))
+
+
+def test_azure_provider_still_requires_base_url_and_key():
+    cfg = _cfg(api_version="2024-08-01-preview", provider="azure")
+    with pytest.raises(ModelBuildError, match="JARVIS_BASE_URL"):
+        build_writer(cfg, build_router(cfg))
+
+
+def test_azure_provider_succeeds_with_all_three_present():
+    cfg = _cfg(base_url="https://x.openai.azure.com/", api_key="k",
+              api_version="2024-08-01-preview", provider="azure")
+    assert build_writer(cfg, build_router(cfg)) is not None
+
+
+def test_gcp_provider_requires_credentials_path_not_an_api_key():
+    cfg = _cfg(gcp_project="my-project", provider="gcp")
+    with pytest.raises(ModelBuildError, match="JARVIS_GCP_CREDENTIALS"):
+        build_writer(cfg, build_router(cfg))
+
+
+def test_gcp_provider_does_not_require_a_project_set_explicitly():
+    # jarvis.llm._gcp_client falls back to the project id embedded in the service-account
+    # file itself when JARVIS_GCP_PROJECT is unset -- this check must not require it, or
+    # it would block a configuration that actually works at runtime.
+    cfg = _cfg(gcp_credentials_path="/secrets/sa.json", provider="gcp")
+    assert build_writer(cfg, build_router(cfg)) is not None
+
+
+def test_gcp_provider_does_not_require_base_url_or_api_key():
+    # GCP auth is a service-account file exchanged for a token, not a static API key --
+    # JARVIS_BASE_URL/JARVIS_API_KEY being unset must not block this provider.
+    cfg = _cfg(gcp_credentials_path="/secrets/sa.json", gcp_project="my-project",
+              provider="gcp")
+    assert build_writer(cfg, build_router(cfg)) is not None
+
+
+def test_a_task_specific_provider_override_is_checked_against_that_provider():
+    # `build_writer` always checks the "synthesis" task -- overriding just that task to
+    # gcp must apply gcp's requirements even though the config's default provider is
+    # still openai.
+    cfg = _cfg(provider="openai", provider_overrides={"synthesis": "gcp"},
+              gcp_credentials_path="/secrets/sa.json", gcp_project="my-project")
+    assert build_writer(cfg, build_router(cfg)) is not None
+
+
+def test_build_router_carries_provider_settings_from_config():
+    cfg = _cfg(provider="azure", provider_overrides={"synthesis": "gcp"})
+    router = build_router(cfg)
+    assert router.provider_for("outline") == "azure"
+    assert router.provider_for("synthesis") == "gcp"

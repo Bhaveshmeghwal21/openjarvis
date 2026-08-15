@@ -102,14 +102,25 @@ class CostTracker:
 
 
 class ModelRouter:
-    """Resolves a corpus task to a concrete model and records measured usage."""
+    """Resolves a corpus task to a concrete model and records measured usage.
+
+    Model and provider are resolved independently: `route(task)` says which model name to
+    ask for, `provider_for(task)` says which backend to ask it of. A task can move to a
+    different vendor without touching its model name, and vice versa — the same
+    override-wins-over-default shape as model routing, one level up.
+    """
 
     def __init__(self, overrides: dict[str, str] | None = None,
                  routing: dict[str, str] | None = None,
-                 tiers: dict[str, str] | None = None) -> None:
+                 tiers: dict[str, str] | None = None,
+                 provider: str = "openai",
+                 provider_overrides: dict[str, str] | None = None) -> None:
         self.routing = dict(routing or DEFAULT_ROUTING)
         self.tiers = dict(tiers or TIERS)
         self.overrides = {k.lower(): v for k, v in (overrides or {}).items()}
+        self.provider = provider.lower()
+        self.provider_overrides = {k.lower(): v.lower()
+                                   for k, v in (provider_overrides or {}).items()}
 
         self.cost = CostTracker()
 
@@ -121,6 +132,9 @@ class ModelRouter:
         if key in self.overrides:
             return self.overrides[key]
         return self.tiers.get(self.tier_for(key), self.tiers[DEFAULT_TIER])
+
+    def provider_for(self, task: str) -> str:
+        return self.provider_overrides.get(task.lower(), self.provider)
 
     def log_usage(self, task: str, input_tokens: int, output_tokens: int,
                   run_id: str = "", model: str | None = None) -> float:
