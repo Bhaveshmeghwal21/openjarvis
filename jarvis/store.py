@@ -100,6 +100,16 @@ CREATE VIRTUAL TABLE IF NOT EXISTS units_fts USING fts5(
     text,
     tokenize = 'porter unicode61'
 );
+
+CREATE TABLE IF NOT EXISTS contradictions (
+    claim_id  TEXT NOT NULL,
+    unit_id   TEXT NOT NULL,
+    run_id    TEXT NOT NULL DEFAULT '',
+    score     REAL NOT NULL DEFAULT 0.0,
+    reviewed  TEXT NOT NULL DEFAULT '',     -- '' | valid | invalid
+    PRIMARY KEY (claim_id, unit_id, run_id)
+);
+CREATE INDEX IF NOT EXISTS idx_contradictions_run ON contradictions(run_id, score DESC);
 """
 
 
@@ -362,3 +372,58 @@ def all_units(conn: sqlite3.Connection, exclude_paper_id: str | None = None) -> 
             (exclude_paper_id,),
         ).fetchall()
     return [_row_to_unit(r) for r in rows]
+
+
+
+# --- contradiction candidates (spec §8) ---------------------------------------------
+
+REVIEW_VERDICTS = ("valid", "invalid")
+
+
+def save_contradictions(conn: sqlite3.Connection, rows, run_id: str = "") -> int:
+    """Persist candidates. A rescan updates scores but never clears a human review."""
+    rows = list(rows)
+    if not rows:
+        return 0
+    conn.executemany(
+        """
+        INSERT INTO contradictions (claim_id, unit_id, run_id, score) VALUES (?,?,?,?)
+        ON CONFLICT(claim_id, unit_id, run_id) DO UPDATE SET score=excluded.score
+        """,
+        [(r["claim_id"], r["unit_id"], run_id, float(r.get("score", 0.0))) for r in rows],
+    )
+    conn.commit()
+    return len(rows)
+
+
+def get_contradictions(conn: sqlite3.Connection, run_id: str = "") -> list[dict]:
+    """Candidates for one run, most confident first."""
+    rows = conn.execute(
+        "SELECT * FROM contradictions WHERE run_id = ? ORDER BY score DESC, claim_id, unit_id",
+        (run_id,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def set_contradiction_review(conn: sqlite3.Connection, claim_id: str, unit_id: str,
+                             verdict: str, run_id: str = "") -> None:
+    """Record a human's judgment on one candidate."""
+    if verdict not in REVIEW_VERDICTS:
+        raise ValueError(f"verdict must be one of {REVIEW_VERDICTS}, got {verdict!r}")
+    conn.execute(
+        "UPDATE contradictions SET reviewed = ? WHERE claim_id = ? AND unit_id = ? "
+        "AND run_id = ?",
+        (verdict, claim_id, unit_id, run_id),
+    )
+    conn.commit()
+
+
+def get_contradiction_reviews(conn: sqlite3.Connection,
+                              run_id: str = "") -> dict[tuple[str, str], bool]:
+    """Reviewed candidates only. Unreviewed ones are absent, never False."""
+    rows = conn.execute(
+        "SELECT claim_id, unit_id, reviewed FROM contradictions "
+        "WHERE run_id = ? AND reviewed != ''",
+        (run_id,),
+    ).fetchall()
+    return {(r["claim_id"], r["unit_id"]): r["reviewed"] == "valid" for r in rows}

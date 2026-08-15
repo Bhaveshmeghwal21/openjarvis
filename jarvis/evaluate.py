@@ -16,6 +16,7 @@ from jarvis.models import Verdict, Verification
 QUOTE_FIDELITY_TARGET = 1.0
 GATE_RECALL_TARGET = 0.95
 STATEMENT_SUPPORT_TARGET = 0.90
+CONTRADICTION_PRECISION_TARGET = 0.70   # ContraCrow parity (spec §10)
 
 KEPT_DECISIONS = {"read_deep", "unsure"}
 
@@ -61,6 +62,17 @@ def citation_recall(verifications: Sequence[Verification]) -> float:
     return sum(1 for ok in by_claim.values() if ok) / len(by_claim)
 
 
+def contradiction_precision(reviews: Mapping[tuple[str, str], bool]) -> float:
+    """Fraction of human-reviewed contradiction candidates that were genuine. Target >= 0.70.
+
+    Measured over reviewed candidates only. An unreviewed candidate is not a failure — it
+    is an unanswered question, and counting it as either would be a lie about the number.
+    """
+    if not reviews:
+        return 0.0
+    return sum(1 for valid in reviews.values() if valid) / len(reviews)
+
+
 def gate_recall(decisions: Mapping[str, str], labels: Mapping[str, bool]) -> float:
     """Fraction of hand-labelled relevant papers the gate kept. Target >= 0.95.
 
@@ -89,6 +101,7 @@ class EvalReport:
     coverage: float | None = None
     citation_precision: float | None = None
     citation_recall: float | None = None
+    contradiction_precision: float | None = None
 
     @property
     def meets_quote_target(self) -> bool:
@@ -104,12 +117,19 @@ class EvalReport:
             return None
         return self.gate_recall >= GATE_RECALL_TARGET
 
+    @property
+    def meets_contradiction_target(self) -> bool | None:
+        if self.contradiction_precision is None:
+            return None
+        return self.contradiction_precision >= CONTRADICTION_PRECISION_TARGET
+
 
 def report(verifications: Sequence[Verification],
            decisions: Mapping[str, str] | None = None,
            labels: Mapping[str, bool] | None = None,
            cited: Iterable[str] | None = None,
-           corpus: Iterable[str] | None = None) -> EvalReport:
+           corpus: Iterable[str] | None = None,
+           contradiction_reviews: Mapping[tuple[str, str], bool] | None = None) -> EvalReport:
     """Bundle the spec §10 metrics that the available data supports."""
     return EvalReport(
         quote_fidelity=quote_fidelity(verifications),
@@ -120,4 +140,6 @@ def report(verifications: Sequence[Verification],
                   if cited is not None and corpus is not None else None),
         citation_precision=citation_precision(verifications),
         citation_recall=citation_recall(verifications),
+        contradiction_precision=(contradiction_precision(contradiction_reviews)
+                                 if contradiction_reviews else None),
     )
