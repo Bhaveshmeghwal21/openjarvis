@@ -17,7 +17,11 @@ pure dispatcher in `jarvis.tools`, with a thin stdio adapter in `jarvis.mcp_serv
 is now also complete: `jarvis.outline` builds a report outline from Layer 2 cards, and
 `jarvis.report` drafts each section against its own bounded evidence set, integrates
 claims across sections, assembles the report, measures corpus coverage, and renders it
-to markdown with references. Contradiction detection (spec step 9) is not yet built.
+to markdown with references. Contradiction detection (spec step 9) is now also complete:
+`jarvis.contradict` retrieves cross-paper evidence topically close to a claim, reuses the
+verification pass's own NLI model to score disagreement, ranks candidates, and runs the
+human review round-trip a precision metric is measured against — output is always ranked
+candidates for review, never assertions.
 """
 from __future__ import annotations
 
@@ -35,11 +39,23 @@ from jarvis.card import (
 from jarvis.citation_graph import CitationWalker, make_s2_neighbors, paper_id
 from jarvis.config import Config
 from jarvis.context import TemplatePrefix, apply_prefixes, embedding_text
+from jarvis.contradict import (
+    Conflict,
+    apply_reviews,
+    opposing_units,
+    rank,
+    read_reviews,
+    render_conflicts,
+    scan_claim,
+    scan_corpus,
+    write_review_sheet,
+)
 from jarvis.embed import BGEEmbedder, FakeEmbedder, index_units, vector_search
 from jarvis.evaluate import (
     EvalReport,
     citation_precision,
     citation_recall,
+    contradiction_precision,
     report,
 )
 from jarvis.evidence import EvidenceSet, cap, order_for_context
@@ -122,6 +138,8 @@ from jarvis.store import (
     all_units,
     close_store,
     get_card,
+    get_contradiction_reviews,
+    get_contradictions,
     get_paper,
     get_papers_by_depth,
     get_screen_decisions,
@@ -129,9 +147,11 @@ from jarvis.store import (
     get_units,
     open_store,
     save_card,
+    save_contradictions,
     save_paper,
     save_screen_decision,
     save_units,
+    set_contradiction_review,
     set_depth,
 )
 from jarvis.text import approx_tokens, find_span, normalize
@@ -153,6 +173,7 @@ __all__ = [
     "CitationWalker",
     "Claim",
     "Config",
+    "Conflict",
     "CostTracker",
     "CrossEncoderReranker",
     "DoclingParser",
@@ -198,6 +219,7 @@ __all__ = [
     "Writer",
     "all_units",
     "apply_prefixes",
+    "apply_reviews",
     "approx_tokens",
     "ask",
     "build_units",
@@ -212,6 +234,7 @@ __all__ = [
     "claims_from_json",
     "close_store",
     "combine_sources",
+    "contradiction_precision",
     "corpus_cards",
     "cosine",
     "decide",
@@ -227,6 +250,8 @@ __all__ = [
     "find_span",
     "gather",
     "get_card",
+    "get_contradiction_reviews",
+    "get_contradictions",
     "get_paper",
     "get_papers_by_depth",
     "get_screen_decisions",
@@ -252,12 +277,16 @@ __all__ = [
     "normalize_openalex",
     "normalize_s2",
     "open_store",
+    "opposing_units",
     "order_for_context",
     "paper_id",
     "paper_text",
+    "rank",
     "read_labels",
+    "read_reviews",
     "recency",
     "render_answer",
+    "render_conflicts",
     "render_report",
     "report",
     "retrieve_iteratively",
@@ -266,11 +295,15 @@ __all__ = [
     "sample_seed",
     "save_candidates",
     "save_card",
+    "save_contradictions",
     "save_paper",
     "save_screen_decision",
     "save_units",
+    "scan_claim",
+    "scan_corpus",
     "screen",
     "search",
+    "set_contradiction_review",
     "set_depth",
     "to_paper",
     "tool_specs",
@@ -281,4 +314,5 @@ __all__ = [
     "verify_claim",
     "write_label_sheet",
     "write_report",
+    "write_review_sheet",
 ]
