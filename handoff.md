@@ -212,6 +212,163 @@ gather, then measure contradiction precision against the 70% target. Expect the 
 run to be a debugging exercise rather than a measurement — every `LLM*` class has only
 ever run against fakes.
 
+## The full CLI task list — everything the spec needs, in one pass
+
+Enough detail to execute without writing a separate plan document first. Every signature
+below was read from the actual source, not recalled. All eight tasks are on one branch;
+they are ordered by dependency, and tasks 1–4 are the ones that unblock everything.
+
+**Global constraints, binding on every task:**
+- Every test offline — no network, no API keys, no model downloads. Every external
+  boundary behind a `typing.Protocol` with a deterministic `Fake*`, matching the existing
+  `Writer`/`NLIModel`/`Embedder`/`Parser` pattern.
+- Heavy dependencies (`docling`, `httpx`, `transformers`, `openai`) imported *inside* the
+  function that needs them, never at module scope — this is why 569 tests run offline.
+- `ruff check .` must stay at exactly 11 violations (the pre-existing baseline).
+- **No new retrieval, verification, or synthesis logic.** This is an operator surface over
+  merged, reviewed functions plus three specific gap-closers. Anything else is scope creep.
+- If a task adds a function that aggregates or looks up claims by id, apply
+  `jarvis.answer._dedupe_claim_ids` first — see the claim-id-collision section above.
+
+### Task 1 — Project resolution, store lifecycle, `jarvis status`
+
+New `jarvis/cli.py` with an argparse subcommand dispatcher; add `jarvis = "jarvis.cli:main"`
+to `[project.scripts]` (leave `jarvis-mcp` untouched — it ships already).
+
+Shared plumbing every later subcommand uses: resolve `--project <name>` through
+`Config.load().project_dir(name) / "corpus.db"`, creating parents; `--db` overrides it
+explicitly. Open with `open_store`, always `close_store` in a `finally`.
+
+`jarvis status` reports, per `DEPTHS = ("deep", "pending_deep", "metadata", "abstract")`,
+the count from `get_papers_by_depth(conn, depth)`, total units, and the latest `runs` row
+with its `cost_usd`. Requires no model of any kind.
+
+*Tests:* status on a nonexistent project is a clean named error, not a traceback; counts
+are correct against a seeded store; the store is closed even when a subcommand raises.
+
+### Task 2 — Model construction and the fail-loud contract
+
+A single helper that builds what a subcommand declares it needs: `ModelRouter(overrides=
+config.model_overrides)`, `BGEEmbedder()`, `HFNLI()`, `LLMWriter(router)`,
+`DoclingParser()`, `LLMPlanner`/`LLMVoter`/`LLMCardExtractor`/`LLMOutliner`.
+
+**A missing `JARVIS_BASE_URL`/`JARVIS_API_KEY`/`UNPAYWALL_EMAIL`, or a missing optional
+extra, must fail immediately naming the exact variable or extra.** Never substitute a
+`Fake*` in an operator tool — a corpus built with a fake model looks real and is not,
+which is the precise failure this whole system exists to prevent.
+
+*Tests:* each missing variable produces an error naming it; no code path reaches a `Fake*`
+when a real model was requested.
+
+### Task 3 — PDF fetch and cache (closes spec gap §5.1)
+
+New `jarvis/fetch.py`. `fetch_pdf(paper: dict, cache_dir: Path, *, unpaywall_email: str)
+-> str | None` returns a local path or `None`. Never raises.
+
+- Cache at `<project_dir>/pdfs/<paper_id>.pdf`; a cache hit skips the network entirely.
+- Source order: `paper["pdf_url"]`, then `paper["url"]`, then Unpaywall by DOI (the
+  Unpaywall adapter already exists in `sources.py`).
+- **Verify the bytes are a PDF** (`%PDF` magic / content-type). A paywall's HTML login
+  page saved as `.pdf` is a fetch failure that would otherwise reach Docling and produce
+  a garbage "successful" parse.
+- Timeouts and one retry; a failure is per-paper data, never a run-ender.
+
+*Tests:* cache hit performs no request; an HTML response is rejected; a failed fetch
+returns `None`; `paper_id` is sanitized so it cannot escape the cache directory.
+
+*First, empirically:* does `DoclingParser` accept a URL directly? Spec §12 open question 1.
+The answer doesn't remove the need for this task (re-parse without re-fetch, parser
+escalation, a meaningful `papers.source_path`) but it does change the failure mode.
+
+### Task 4 — `jarvis gather` (closes spec gaps §5.2 and §5.3)
+
+The one substantial task. Wires stages A–C end to end:
+
+```
+planner (LLMPlanner | TemplatePlanner)
+  -> combine_sources(make_arxiv_search(...), make_s2_search(...),
+                     make_openalex_search(..., mailto=...), make_crossref_search(...))
+  -> gather(question, planner, search_fn, neighbors=..., score_fn=..., budget=...)
+  -> save_candidates(conn, candidates)
+  -> screen(conn, candidates, question, embedder, voter=..., run_id=...)
+  -> [CONFIRMATION GATE — print decision counts, stop unless --yes]
+  -> fetch_pdf per kept candidate  (Task 3)
+  -> ingest_decided(conn, decisions, candidates, parser, embedder,
+                    path_for=<cached local path>)
+  -> extract_and_verify(conn, paper, extractor) per successfully-ingested paper
+```
+
+Three things this task must get right beyond the wiring:
+
+1. **Card extraction** (`extract_and_verify(conn, paper, extractor) -> Card`) runs after
+   ingest, with its own per-paper failure isolation. Without it `corpus_cards(conn)` stays
+   empty and every report comes out blank.
+2. **Cost**: one `ModelRouter` owned for the whole run; write
+   `save_run(conn, run_id, question, started_at, cost_usd=router.cost.total_cost)` in a
+   `finally` — a cost number that only appears on success is not a cost control.
+   (`total_cost` is a property on `CostTracker`.)
+3. **Resumability**: re-running `gather` on an existing project picks up `pending_deep`
+   papers rather than re-searching. The depth transitions already encode progress.
+
+Flags: `--yes`, `--budget` (into `gather()`'s existing `budget`), `--limit`, `--sources`.
+Report counts at every stage — zero papers fetched, zero units indexed, and zero cards
+extracted are all valid outputs and all suspicious.
+
+*Tests:* the gate blocks without `--yes`; cost is written even when the run fails midway;
+resumption doesn't re-search; one unfetchable PDF and one unparseable PDF each cost exactly
+one paper; a run that ingests nothing says so rather than reporting success.
+
+### Task 5 — `jarvis ask` and `jarvis report`
+
+`ask(conn, question, embedder, writer, nli, limit=..., rounds=...)` → `render_answer`.
+`write_report(conn, topic, outliner, ...)` → `render_report`, plus `evaluate_report(report)`
+for the coverage/citation numbers. `--out` writes markdown to a file.
+
+**`report` must fail with a named error when `corpus_cards(conn)` is empty** rather than
+emitting an empty report — otherwise the §5.2 gap resurfaces as a mystery report bug.
+
+*Tests:* an empty-card corpus produces the named error; a question with no supporting
+evidence renders the honest "no evidence" answer rather than an empty success.
+
+### Task 6 — `jarvis contradictions` and `jarvis review`
+
+`scan_corpus(conn, claims, nli, embedder, run_id=..., budget=...)` → `rank` →
+`write_review_sheet(path, conflicts)` and `render_conflicts(conflicts, top_n=20)`.
+
+Claims come from the most recent report, or `--from-report <path>` (spec §9 — the spec's
+least-confident decision; the first real corpus should inform it). Scanning with no report
+available is a named error, not an empty result.
+
+`jarvis review <sheet>`: `read_reviews(path)` → `apply_reviews(conn, reviews)` →
+`contradiction_precision(reviews)`, printed against the 0.70 target. **This is the command
+that finally produces the number the entire build order has been blocked on.**
+
+*Tests:* no-report is a named error; precision is computed over reviewed candidates only
+(an unreviewed candidate is an unanswered question, not a failure — `evaluate.py` documents
+this explicitly); a partially-reviewed sheet reports progress rather than a wrong number.
+
+### Task 7 — `jarvis calibrate`
+
+`sample_seed(candidates, size=...)` → `write_label_sheet(path, candidates)` → human edits →
+`read_labels(path)` → `calibrate(signal_rows, labels)` → `calibration_report(...)`.
+`label_progress(path)` reports partial completion.
+
+This is the gate's ≥95% recall target (design spec §7B) and answers open question 3, gate
+calibration transfer, by scoring one project's thresholds against another's labels.
+
+### Task 8 — `jarvis mcp` alias, README, and a real quickstart
+
+`jarvis mcp` delegates to `mcp_server.main`; `jarvis-mcp` keeps working unchanged for
+existing client configs. Update `README.md` with an actual quickstart — install, env vars,
+`jarvis gather`, `jarvis ask` — replacing the current state where the only documented
+entry point serves a corpus no documented command can create.
+
+### After the eight tasks
+
+Final whole-branch adversarial review, fix wave, independent re-review, ledger
+(`LEDGER-cli.md`), handoff update — the same process every branch has used. Then the first
+real gather run, which is a debugging exercise, not a measurement.
+
 ## How to execute a plan (kept for reference — none currently exist)
 
 1. Create a worktree and branch (`git worktree add .worktrees/<name> -b <name>`). **Do not
