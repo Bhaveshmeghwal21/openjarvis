@@ -145,3 +145,93 @@ def test_list_papers_rejects_an_unknown_depth(ctx):
     result = call_tool(ctx, "list_papers", {"depth": "sideways"})
     assert result["ok"] is False
     assert "depth" in result["error"]
+
+
+
+from jarvis.models import Claim
+from jarvis.verify import FakeNLI
+from jarvis.writer import Draft, FakeWriter
+
+ENTAILS = FakeNLI(default={"entailment": 0.95, "neutral": 0.03, "contradiction": 0.02})
+
+
+def test_a_real_quote_verifies(ctx):
+    unit = _table_unit(ctx)
+    result = call_tool(ctx, "verify_quote", {"unit_id": unit.unit_id,
+                                             "quote": "| ours | 94.2 |"})
+    assert result["ok"] is True
+    assert result["grounded"] is True
+
+
+def test_a_fabricated_quote_does_not_verify(ctx):
+    unit = _table_unit(ctx)
+    result = call_tool(ctx, "verify_quote", {"unit_id": unit.unit_id,
+                                             "quote": "| ours | 99.9 |"})
+    assert result["ok"] is True
+    assert result["grounded"] is False
+
+
+def test_verification_survives_hyphenation_and_smart_punctuation(ctx):
+    prose = next(u for u in get_units(ctx.conn, "p1") if u.type.value == "prose")
+    result = call_tool(ctx, "verify_quote",
+                       {"unit_id": prose.unit_id, "quote": "94.2% tracking accuracy"})
+    assert result["grounded"] is True
+
+
+def test_verification_needs_no_model_configured(ctx):
+    assert ctx.nli is None
+    assert ctx.writer is None
+    unit = _table_unit(ctx)
+    assert call_tool(ctx, "verify_quote",
+                     {"unit_id": unit.unit_id, "quote": "| ours | 94.2 |"})["ok"] is True
+
+
+def test_verify_quote_requires_both_arguments(ctx):
+    unit = _table_unit(ctx)
+    assert call_tool(ctx, "verify_quote", {"unit_id": unit.unit_id})["ok"] is False
+    assert call_tool(ctx, "verify_quote", {"quote": "x"})["ok"] is False
+
+
+def test_verifying_against_an_unknown_unit_is_not_grounded(ctx):
+    result = call_tool(ctx, "verify_quote", {"unit_id": "nope", "quote": "anything"})
+    assert result["ok"] is True
+    assert result["grounded"] is False
+
+
+def test_ask_is_unavailable_without_a_writer(ctx):
+    result = call_tool(ctx, "ask", {"question": "how accurate?"})
+    assert result["ok"] is False
+    assert "writer" in result["error"]
+
+
+def test_ask_returns_a_cited_answer_when_configured(ctx):
+    unit = _table_unit(ctx)
+    ctx.writer = FakeWriter({"how accurate?": Draft(
+        text="It is accurate.",
+        claims=(Claim("c-0", "It reaches 94.2%.", unit.unit_id, "| ours | 94.2 |"),))})
+    ctx.nli = ENTAILS
+
+    result = call_tool(ctx, "ask", {"question": "how accurate?"})
+    assert result["ok"] is True
+    assert result["claims"][0]["unit_id"] == unit.unit_id
+    assert result["claims"][0]["verdict"] == "supported"
+    assert unit.unit_id in result["answer"]
+
+
+def test_ask_reports_blocked_claims_separately(ctx):
+    unit = _table_unit(ctx)
+    ctx.writer = FakeWriter({"how accurate?": Draft(
+        text="It reaches 99.9%.",
+        claims=(Claim("c-0", "It reaches 99.9%.", unit.unit_id, "| ours | 99.9 |"),))})
+    ctx.nli = ENTAILS
+
+    result = call_tool(ctx, "ask", {"question": "how accurate?"})
+    assert result["ok"] is True
+    assert result["blocked"] == 1
+    assert result["claims"] == []
+    assert "99.9" not in result["answer"]
+
+
+def test_ask_requires_a_question(ctx):
+    ctx.writer, ctx.nli = FakeWriter({}), ENTAILS
+    assert call_tool(ctx, "ask", {})["ok"] is False

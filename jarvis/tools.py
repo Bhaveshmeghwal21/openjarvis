@@ -242,3 +242,83 @@ register(ToolSpec(
     },
     handler=_list_papers,
 ))
+
+
+
+def _verify_quote(ctx: ToolContext, args: dict) -> dict:
+    from jarvis.models import Claim
+    from jarvis.verify import quote_is_grounded
+    claim = Claim(claim_id="tool-check", text="", unit_id=str(args["unit_id"]),
+                  quote=str(args["quote"]))
+    return ok(grounded=quote_is_grounded(ctx.conn, claim), unit_id=claim.unit_id)
+
+
+register(ToolSpec(
+    name="verify_quote",
+    description=(
+        "Check whether a quote appears VERBATIM in a unit's source paper. Deterministic "
+        "string match against the immutable parsed text — no model, no cost, no judgment "
+        "call. Call this before asserting anything you quoted: if it returns "
+        "grounded=false, the quote is not in the paper and the claim must not be made. "
+        "Whitespace, ligatures, smart quotes, and hyphenation across line breaks are "
+        "normalized, so a faithful copy will match even if the formatting differs."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "unit_id": {"type": "string"},
+            "quote": {"type": "string", "description": "The exact text you intend to quote."},
+        },
+        "required": ["unit_id", "quote"],
+    },
+    handler=_verify_quote,
+    required=("unit_id", "quote"),
+))
+
+
+def _ask(ctx: ToolContext, args: dict) -> dict:
+    from jarvis.answer import ask as _ask_impl
+    from jarvis.answer import render_answer
+
+    limit = clamp_limit(args.get("limit"), default=8, maximum=ctx.max_limit)
+    answer = _ask_impl(ctx.conn, str(args["question"]), ctx.embedder, ctx.writer, ctx.nli,
+                       limit=limit, reranker=ctx.reranker)
+
+    supported = []
+    for verification in answer.supported:
+        claim = answer.claim_for(verification.claim_id)
+        if claim is not None:
+            supported.append({"text": claim.text, "unit_id": claim.unit_id,
+                              "quote": claim.quote, "verdict": verification.verdict.value})
+    flagged = []
+    for verification in answer.flagged:
+        claim = answer.claim_for(verification.claim_id)
+        if claim is not None:
+            flagged.append({"text": claim.text, "unit_id": claim.unit_id,
+                            "quote": claim.quote, "verdict": verification.verdict.value})
+
+    return ok(answer=render_answer(answer), claims=supported, flagged=flagged,
+              blocked=len(answer.blocked), queries=list(answer.queries))
+
+
+register(ToolSpec(
+    name="ask",
+    description=(
+        "Answer a question from this corpus with verified citations. Retrieves evidence, "
+        "drafts an answer, then mechanically verifies every claim: claims whose quote is "
+        "not in the source are REMOVED from the answer and reported only as a count in "
+        "`blocked`; claims that ground but do not clearly entail appear in `flagged`. "
+        "Everything in `claims` has been verified. Requires a configured writer model."
+    ),
+    schema={
+        "type": "object",
+        "properties": {
+            "question": {"type": "string"},
+            "limit": {"type": "integer", "description": "Max evidence units to consider."},
+        },
+        "required": ["question"],
+    },
+    handler=_ask,
+    required=("question",),
+    requires=("writer", "nli"),
+))
