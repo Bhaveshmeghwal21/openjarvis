@@ -1,18 +1,15 @@
 # Handoff — jarvis
 
-Updated 2026-08-15 (fourth update). Supersedes the prior version, which described
-`compile-cited-qa` as not started. It is now complete on its own branch, reviewed, fixed,
-and not yet merged.
+Updated 2026-08-15 (fifth update). Supersedes the prior version, which described
+`compile-cited-qa` as complete but unmerged. It is now merged to `main` and pushed.
 
-**State in one line:** spec build steps 1–6 are on `main` and pushed. Step 7 (compile —
-cited Q&A) is complete on branch `compile-cited-qa`, reviewed and fixed, not yet merged.
-Steps 8–10 each have a written plan; none has been started.
+**State in one line:** spec build steps 1–7 are on `main` and pushed. Steps 8–10 each have
+a written plan; none has been started, and none is blocked anymore.
 
 ## Orient yourself in 60 seconds
 
 ```
-main:               76fe424 (steps 1-6), pushed, in sync with origin
-compile-cited-qa:   branched from main at e847ca7, HEAD at 09a5bf8, NOT YET MERGED
+main:  406f995 (steps 1-7), pushed, in sync with origin
 ```
 
 | What | Where |
@@ -20,39 +17,40 @@ compile-cited-qa:   branched from main at e847ca7, HEAD at 09a5bf8, NOT YET MERG
 | The design spec — read this first | `docs/specs/2026-08-11-research-corpus-agent-design.md` |
 | Completed plan, steps 1-5 | `docs/plans/2026-08-11-verifiable-single-paper-core.md` |
 | Completed plan, step 6 | `docs/plans/2026-08-14-gather-and-gate.md` |
-| Completed plan, step 7 (on `compile-cited-qa`, unmerged) | `docs/plans/2026-08-14-compile-cited-qa.md` |
+| Completed plan, step 7 | `docs/plans/2026-08-14-compile-cited-qa.md` |
 | **Written but not started: steps 8, 9, 10** | `docs/plans/2026-08-14-{mcp-server,contradiction-detection,longform-reports}.md` |
 | Record of steps 1-5's build + review | `LEDGER.md` (on `main`) |
 | Record of step 6's build + two-round review | `LEDGER-gather-and-gate.md` (on `main`) |
-| Record of step 7's build + review | `LEDGER-compile-cited-qa.md` (on `compile-cited-qa`, unmerged) |
+| Record of step 7's build + review | `LEDGER-compile-cited-qa.md` (on `main`) |
 
 ```
 main:
-  HEAD:   76fe424  merge: gather and gate (spec build step 6)
-  tests:  329 passing
-  ruff:   11 pre-existing violations
+  HEAD:   406f995  merge: compile — cited Q&A (spec build step 7)
+  tests:  403 passing
+  ruff:   11 pre-existing violations, zero new
   remote: origin -> https://github.com/Bhaveshmeghwal21/openjarvis (public), pushed, in sync
-
-compile-cited-qa (unmerged):
-  HEAD:   09a5bf8  docs: final ledger and README update for compile-cited-qa (spec step 7)
-  tests:  403 passing (329 baseline + 74 new)
-  ruff:   still exactly 11 pre-existing violations, zero new
 ```
 
 ## What changed since the last handoff
 
-**The compile-cited-qa plan (spec build step 7) was fully executed**, on a new worktree
-and branch, in one continuous session: all 6 plan tasks via subagent-driven development
-(fresh haiku implementer per task, sonnet task reviewer), a final whole-branch adversarial
-review on opus, a consolidated fix wave, and a re-review the controller performed directly
-after the fixing agent hit a session usage limit mid-report (the commit had already
-landed — verified via `git log`/`git status` before treating anything as failed). Not yet
-merged.
+**`compile-cited-qa` (spec build step 7) was merged into `main` and pushed.** Merge was a
+plain `--no-ff` merge commit (no conflicts), matching the pattern of the step-6 merge. Full
+test suite re-run on `main` after the merge: 403 passing, exit 0. The worktree and local
+branch were removed afterward (`git worktree remove`, `git branch -d`) — the branch's
+history lives on in `main` and in `LEDGER-compile-cited-qa.md`.
+
+Before merging, the rationale was checked explicitly rather than assumed: the branch met
+the same completion bar as the two branches already on `main` (full plan, final
+whole-branch adversarial review, fix wave, independent re-review, tests green, ruff clean),
+the one open item (Task 2's RRF fix lacking a regression test) was a coverage gap already
+examined and deliberately parked rather than a correctness risk, and downstream plans (MCP
+server, long-form reports) were blocked on this branch's modules — holding it unmerged had
+no upside and a real downside (single point of failure, not pushed, not visible to any
+other session).
 
 ## What is built
 
-Spec §13 lists ten build steps. **1 through 7 are done.** 1-6 are on `main`; 7 is on
-`compile-cited-qa`, unmerged.
+Spec §13 lists ten build steps. **1 through 7 are done, all on `main`.**
 
 | Step | Status | Modules |
 |---|---|---|
@@ -62,8 +60,8 @@ Spec §13 lists ten build steps. **1 through 7 are done.** 1-6 are on `main`; 7 
 | 4. Verification | done, `main`, one caveat below | `verify.py` |
 | 5. Eval harness | done, `main`, one gap below | `evaluate.py` |
 | 6. Gather + gate | done, `main` | `gather.py`, `gate.py`, `label.py`, `ingest.py`, `card.py` + extensions to `store.py`/`sources.py` |
-| 7. Compile — cited Q&A | **done, `compile-cited-qa`, unmerged** | `evidence.py`, `retriever.py`, `writer.py`, `answer.py` |
-| 8-10 | **not started** | plans written, see table above |
+| 7. Compile — cited Q&A | **done, `main`** | `evidence.py`, `retriever.py`, `writer.py`, `answer.py` |
+| 8-10 | **not started, unblocked** | plans written, see table below |
 
 Caveats carried forward, still true:
 
@@ -116,7 +114,9 @@ from the rendered answer entirely).
 - **Task 2's own RRF fusion fix has no real regression test (Important, parked, human
   declined to fix).** Confirmed directly: reverting `jarvis/retriever.py` to its pre-fix
   round-block-concatenation version leaves all 14 `test_retriever.py` tests passing — the
-  "corrected" dedup test only asserts id-uniqueness and round count, never order.
+  "corrected" dedup test only asserts id-uniqueness and round count, never order. **Still
+  open on `main`** — a real coverage gap worth closing before anyone next modifies
+  `retriever.py`, since a regression there wouldn't be caught.
 
 Every fix was independently re-verified — for the two highest-stakes ones (the Critical
 id-collision fix and the ordering fix), the controller **temporarily reverted each fix and
@@ -136,16 +136,15 @@ and confirm the test actually fails.
 | # | Plan | Spec step | Tasks | Status |
 |---|---|---|---|---|
 | 1 | `2026-08-14-gather-and-gate.md` | 6 | 13 | **done, merged, pushed** |
-| 2 | `2026-08-14-compile-cited-qa.md` | 7 | 6 | **done, reviewed, fixed — unmerged** |
-| 3 | `2026-08-14-mcp-server.md` | 8 | 5 | not started; depends on plan 2 (done, on its branch) |
+| 2 | `2026-08-14-compile-cited-qa.md` | 7 | 6 | **done, merged, pushed** |
+| 3 | `2026-08-14-mcp-server.md` | 8 | 5 | not started; unblocked (depends on plan 2, now on `main`) |
 | 4 | `2026-08-14-contradiction-detection.md` | 9 | 5 | not started; *useful* only once a real gathered corpus exists |
-| 5 | `2026-08-14-longform-reports.md` | 10 | 6 | not started; depends on plan 2 (done, on its branch) |
+| 5 | `2026-08-14-longform-reports.md` | 10 | 6 | not started; unblocked (depends on plan 2, now on `main`) |
 
-**Recommended next: merge `compile-cited-qa`, then MCP server, then contradiction
-detection and long-form reports in either order.** MCP and long-form reports both depend
-on `jarvis.answer`/`jarvis.writer`/`jarvis.retriever`/`jarvis.evidence`, which only exist
-on the unmerged `compile-cited-qa` branch right now — either merge it first, or branch the
-next plan's worktree from `compile-cited-qa` instead of `main` if working in parallel.
+**Recommended next: MCP server**, then contradiction detection and long-form reports in
+either order. MCP server is the smallest and most self-contained of the three, and it's
+what makes the corpus usable from Claude Code before any UI exists. All three can now
+branch straight from `main` — no more need to branch from another feature branch.
 
 Each plan is self-contained: goal, architecture, global constraints, file structure, and
 per-task TDD steps with the actual code. Hand one to a fresh session and it needs nothing
@@ -174,6 +173,8 @@ else from this document or any conversation history.
    revert the fix, confirm its regression test actually fails, then restore.
 6. Merge to `main` and push only with explicit go-ahead — every branch so far has waited
    for that, and `main` has a public remote, which raises the stakes of an unreviewed push.
+   When the human does confirm, run the full test suite again on `main` itself after the
+   merge (not just on the branch) before pushing — the merge itself is worth verifying.
 
 ## Patterns worth keeping — reconfirmed across four branches now
 
@@ -226,11 +227,12 @@ else from this document or any conversation history.
   before mutating anything.
 
 - **`python -m pytest -q | grep passed` returns nothing** in this shell — CR-terminated
-  progress output. Use `--junit-xml` and read `tests=`/`failures=`, or `--collect-only`.
+  progress output. Use `--junit-xml` and read `tests=`/`failures=`, exit code (`0` = all
+  passed), or `--collect-only`.
 
 - **The ruff baseline is 11**, in `citation_graph.py` (2), `config.py` (1), `scoring.py`
   (1), `sources.py` (6), `test_ported.py` (1) — all files ported from NanoResearch, not
-  written for this project. Confirmed unchanged through three full plans now. Do not fix
+  written for this project. Confirmed unchanged through four full plans now. Do not fix
   as part of feature work; do not add to it.
 
 - **A "rescue floor" for a degenerate computed value is hard to get right on the first
@@ -239,9 +241,10 @@ else from this document or any conversation history.
 
 ## Loose ends
 
-- **`compile-cited-qa` is not merged.** Branch-finish (merge to `main`, worktree/branch
-  cleanup, push) has not been proposed as an action yet this session — same posture as
-  every prior branch: propose mechanics and wait for explicit confirmation.
+- **`jarvis/retriever.py`'s RRF cross-round fix has no real regression test** (see the
+  adversarial-review section above) — the one finding from step 7's review that was
+  deliberately parked rather than fixed. Worth a small dedicated task before the next
+  change to that file: assert on fused *order*, not just on id-uniqueness or round count.
 - **`main` has a public remote and is being pushed to.** Flag any future push as the
   outbound, semi-irreversible action it is.
 - **One spec §10 metric is unclaimed by any remaining plan: cost per project.**
@@ -255,8 +258,10 @@ else from this document or any conversation history.
 - **`LLMPlanner`, `LLMVoter`, `LLMCardExtractor`, `LLMRefiner`, and `LLMWriter`'s live
   paths are tested against fakes only** — none has been exercised against a real model
   endpoint yet. Deliberate deferral, not a gap, but worth knowing.
-- **This file is untracked**, deliberately. `LEDGER.md`, `LEDGER-gather-and-gate.md`, and
-  `LEDGER-compile-cited-qa.md` are the tracked records.
+- **This file is tracked on `main`** (as of the compile-cited-qa merge). `LEDGER.md`,
+  `LEDGER-gather-and-gate.md`, and `LEDGER-compile-cited-qa.md` remain the authoritative
+  per-branch records; this file is the cross-branch orientation layer, kept current at the
+  end of each branch's work.
 
 ## Open questions the spec asks and the code has not yet answered
 
