@@ -15,6 +15,7 @@ import sqlite3
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 
+from jarvis.answer import _dedupe_claim_ids, _drop_citations_outside_evidence
 from jarvis.embed import Embedder
 from jarvis.evaluate import EvalReport, coverage
 from jarvis.evaluate import report as eval_report
@@ -70,6 +71,17 @@ def draft_section(conn: sqlite3.Connection, section: Section, embedder: Embedder
     The cap is applied here, per section — never once over an assembled whole-report
     context. That is the difference between many small well-scoped calls and one large
     one, and the measured difference is 13 F1 points.
+
+    Applies the same two claim-side defenses `jarvis.answer.ask` applies, unchanged:
+    `_dedupe_claim_ids` (a `Writer` is an untrusted Protocol boundary; without this, two
+    claims sharing an id let a later claim's verdict attach to an earlier, unrelated
+    claim's text via `SectionDraft.claim_for`'s first-match lookup — including rendering a
+    blocked claim's fabricated text as if it were the supported claim sharing its id) and
+    `_drop_citations_outside_evidence` (a real quote from a unit outside this section's own
+    capped evidence would otherwise verify and render as if it came from evidence this
+    function actually bounded). The plan requires this logic to stay identical to `ask`'s;
+    importing the same two functions rather than re-implementing them is how it stays that
+    way if either is ever changed.
     """
     retrieval = retrieve_iteratively(conn, section.question, embedder, refiner=refiner,
                                      rounds=rounds, limit=limit, reranker=reranker)
@@ -77,10 +89,12 @@ def draft_section(conn: sqlite3.Connection, section: Section, embedder: Embedder
     evidence = order_for_context(budget.units)
 
     draft = writer.write(section.question, evidence)
+    claims = _dedupe_claim_ids(draft.claims)
+    claims = _drop_citations_outside_evidence(claims, evidence)
     verifications = tuple(verify_claim(conn, claim, nli, threshold=threshold)
-                          for claim in draft.claims)
+                          for claim in claims)
 
-    return SectionDraft(section=section, text=draft.text, claims=draft.claims,
+    return SectionDraft(section=section, text=draft.text, claims=claims,
                         verifications=verifications, units=tuple(evidence),
                         dropped_evidence=budget.dropped)
 

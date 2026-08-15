@@ -399,3 +399,45 @@ def test_an_empty_report_renders_without_pretending_otherwise(corpus):
     text = render_report(corpus, report)
     assert "## References" in text
     assert "no " in text.lower()
+
+
+
+def test_a_claim_id_collision_within_one_section_never_lets_a_blocked_claims_text_render(
+        corpus):
+    """Reproduces the exact defect class critical Finding 1 on compile-cited-qa was:
+    a Writer emitting two claims sharing one claim_id must never let the fabricated one's
+    text render as if it were the real, supported one that happens to share its id.
+    """
+    unit = _unit(corpus, "p1", "94.2")
+
+    class HostileWriter:
+        def write(self, question, units):
+            return Draft(text="t", claims=(
+                Claim("c-0", "FABRICATED 99.9% accuracy", unit.unit_id,
+                      "99.9% tracking accuracy"),
+                Claim("c-0", "real 94.2% accuracy", unit.unit_id,
+                      "94.2% tracking accuracy"),
+            ))
+
+    draft = draft_section(corpus, RESULTS, FakeEmbedder(), HostileWriter(), ENTAILS)
+    assert len(draft.blocked) == 1
+    assert len(draft.supported) == 1
+    for verification in draft.supported:
+        claim = draft.claim_for(verification.claim_id)
+        assert claim is not None
+        assert "FABRICATED" not in claim.text
+
+
+def test_a_claim_citing_a_unit_outside_this_sections_own_evidence_is_dropped(corpus):
+    """A real quote from a unit never shown to this section's writer must not verify."""
+    ghost_unit_id = "p9:prose:1:0"  # a syntactically real unit_id, never shown to any writer
+
+    class OutOfBudgetWriter:
+        def write(self, question, units):
+            assert ghost_unit_id not in {u.unit_id for u in units}
+            return Draft(text="t", claims=(
+                Claim("x-0", "out of budget", ghost_unit_id, "94.2% tracking accuracy"),))
+
+    draft = draft_section(corpus, RESULTS, FakeEmbedder(), OutOfBudgetWriter(), ENTAILS)
+    assert draft.claims == ()
+    assert draft.verifications == ()

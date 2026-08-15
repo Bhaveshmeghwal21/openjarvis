@@ -122,9 +122,21 @@ class LLMOutliner:
         prompt = _OUTLINE_PROMPT.format(max_sections=self._max_sections,
                                         topic=fallback.topic, digest=cards_digest(cards))
         try:
-            raw = self._chat_fn()(self._router, "outline", prompt, json_mode=True)
-        except Exception:  # noqa: BLE001
+            return self._parsed_outline(fallback, prompt, cards)
+        except Exception:  # noqa: BLE001 - chat_fn is an untrusted Protocol boundary
             return fallback
+
+    def _parsed_outline(self, fallback: Outline, prompt: str,
+                        cards: Sequence[Card]) -> Outline:
+        """Everything that can fail on a hostile reply, wrapped by `outline`'s one catch.
+
+        Not just the `chat_fn()` call itself: a double whose returned object's own `.get`
+        raises, or whose title/question value has a raising `__str__`, must fall back to
+        the template exactly like an outright `chat_fn` exception does — the docstring's
+        "falls back to the template on failure" promise otherwise only held for the first
+        of two ways a reply can misbehave.
+        """
+        raw = self._chat_fn()(self._router, "outline", prompt, json_mode=True)
         if not isinstance(raw, dict) or not isinstance(raw.get("sections"), list):
             return fallback
 

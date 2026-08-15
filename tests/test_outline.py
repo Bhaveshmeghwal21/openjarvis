@@ -126,6 +126,18 @@ def test_llm_outliner_falls_back_to_the_template_on_failure():
         TemplateOutliner().outline("t", CARDS)
 
 
+def test_llm_outliner_falls_back_when_the_replys_own_get_raises():
+    """Not just a chat_fn exception -- a hostile reply object misbehaving after the call
+    returns must fall back too, exactly as the module's own docstring promises."""
+
+    class HostileDict(dict):
+        def get(self, *args, **kwargs):
+            raise RuntimeError("hostile get")
+
+    assert LLMOutliner(_Router(), chat_fn=lambda *a, **k: HostileDict(
+        sections=[])).outline("t", CARDS) == TemplateOutliner().outline("t", CARDS)
+
+
 def test_llm_outliner_falls_back_on_junk():
     for junk in (None, {}, "text", {"sections": []}, {"sections": "x"}):
         outliner = LLMOutliner(_Router(), chat_fn=lambda *a, _junk=junk, **k: _junk)
