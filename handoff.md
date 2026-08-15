@@ -1,18 +1,21 @@
 # Handoff — jarvis
 
-Updated 2026-08-15 (eleventh update). Supersedes the prior version, which described the
-CLI as complete but unmerged. It is now merged to `main` and pushed. **The system can be
-run for the first time in this project's history.**
+Updated 2026-08-16 (twelfth update). Supersedes the prior version, which described the CLI
+as merged but never run. **It has now been run for real — search, screen, deep-read, and
+`jarvis ask` all completed live against a real paper with real GCP-backed models, and the
+core verification mechanism caught a real unsupported claim.** This is the most important
+update in the project's history: everything before this was building toward this one
+result, and it worked.
 
-**State in one line:** all ten spec build steps plus the CLI
-(`docs/specs/2026-08-15-cli-and-operations.md`) are on `main` and pushed. There is no
-remaining implementation work. The next milestone is the first real gather run — see "What
-comes next" below.
+**State in one line:** all ten spec build steps, the CLI, and multi-provider chat support
+(`openai`/`azure`/`gcp`) are on `main` and pushed. The system has been proven end to end
+against a real corpus for the first time. See "THE FIRST REAL RUN" below before doing
+anything else.
 
 ## Orient yourself in 60 seconds
 
 ```
-main:  19c6209 (all 10 spec steps + CLI), pushed, in sync with origin
+main:  dacb602 (all 10 spec steps + CLI + multi-provider + --max-deep), pushed, in sync
 ```
 
 | What | Where |
@@ -21,29 +24,150 @@ main:  19c6209 (all 10 spec steps + CLI), pushed, in sync with origin
 | The original design spec | `docs/specs/2026-08-11-research-corpus-agent-design.md` |
 | Record of the CLI's build + review | `LEDGER-cli.md` (on `main`) |
 | Records of all 10 spec build steps' build + review | `LEDGER.md`, `LEDGER-gather-and-gate.md`, `LEDGER-compile-cited-qa.md`, `LEDGER-mcp-server.md`, `LEDGER-contradiction-detection.md`, `LEDGER-longform-reports.md` (all on `main`) |
+| **A working real-project virtualenv** | `.venv/` at the repo root — see "Environment setup" below. Do not rely on the global Python install. |
+| **Real test corpus from the first live run** | `.dev-local/projects/gcp-smoke-test/corpus.db` — gitignored, kept in-repo instead of scattered across the machine. 179 candidates screened, 1 fully deep-read with a verified card. |
 
 ```
 main:
-  HEAD:   19c6209  merge: CLI and operations (docs/specs/2026-08-15-cli-and-operations.md)
-  tests:  631 passing
+  HEAD:   dacb602  feat: --max-deep caps how many kept papers get deep-read per run
+  tests:  669 passing
   ruff:   11 pre-existing violations, zero new
   remote: origin -> https://github.com/Bhaveshmeghwal21/openjarvis (public), pushed, in sync
 ```
 
+## THE FIRST REAL RUN — read this before doing anything else
+
+Every prior handoff update said some version of "this has never been run against a real
+model or a real paper." That is no longer true. Using a live GCP service-account
+credential (`google/gemini-3.7-flash` via Vertex AI's OpenAI-compatible endpoint) and a
+real arXiv paper:
+
+1. **`jarvis gather "quadrotor wind disturbance rejection control"`** — real search
+   against arXiv/S2/OpenAlex/Crossref found **179 candidates**. Real GCP-backed screening
+   kept **179/179** (expected, uncalibrated-gate behavior — see Loose ends). Real measured
+   cost: **$0.007795**, correctly written to `runs.cost_usd`.
+2. **`jarvis gather ... --yes --max-deep 3`** (resumed, so no re-search) — of the 3
+   attempted: **2 failed at fetch** (one candidate had no `pdf_url` at all, one only had a
+   DOI-redirect landing page that isn't a direct PDF — both real, expected failure modes,
+   not bugs), **1 succeeded completely**: fetched, parsed via Docling into **29 units**,
+   embedded, and had a card extracted via live `google/gemini-3.7-flash` with **both
+   extracted fields (`problem`, `method`) mechanically verified** (`binding_verified=True`
+   — the quote genuinely appears in the cited unit, checked by `verify_card`, not asserted
+   by the model).
+3. **`jarvis ask "how does GustPilot handle wind disturbances during quadrotor
+   navigation?"`** against that one-paper corpus — this is the result that matters most:
+   the writer drafted three claims with citations; local `HFNLI` verification **supported
+   two of them** and **correctly flagged the third** — *"the quote is real but does not
+   clearly support the claim"* (a NEUTRAL verdict) — rather than either blocking it or
+   rendering it as a confident, cited fact. That is the exact statement-hallucination
+   detection the whole design spec (§8) exists to provide, working live, for the first
+   time, on a claim a real model actually produced.
+
+**This is the proof the entire ten-step spec plus the CLI were building toward.** Nothing
+about steps 1-10 or the CLI needed to change to make this work — the architecture held.
+
+### What this run also surfaced (real gaps, now understood)
+
+- **The gate keeps everything pre-calibration (179/179).** Not a bug — a union gate with
+  no `exclude` outcome is deliberately permissive until `jarvis calibrate` runs against a
+  hand-labeled seed set. But it meant `--yes` had no cost control at all, which is why
+  `--max-deep` was added (see below) before this run went further than 3 papers.
+- **`torch.compile` is fundamentally broken on this Windows machine** — MSVC has no
+  `omp.h` (OpenMP header), so any `torch.compile`-JIT-backed model (Docling's RT-DETR
+  layout model, and apparently others) fails with `CppCompileError` on first use. Fixed by
+  setting `TORCH_COMPILE_DISABLE=1`, which forces eager execution — no measurable
+  correctness cost for a single-document run, unmeasured for throughput at scale.
+- **Vertex AI needs a publisher-prefixed model name**: `google/gemini-3.7-flash`, not
+  `gemini-3.7-flash` — the bare form fails with "malformed publisher model." Now
+  documented in `jarvis/llm.py`'s module docstring.
+- **Real fetch failure rate on this tiny sample: 2/3 (67%).** Far too small to generalize
+  from, but it's the first real data point for CLI spec open question 2, and it confirms
+  the design spec's own risk table was right to flag this.
+
+## Environment setup — do this, don't rediscover it
+
+**Two structural problems exist on this specific machine, neither caused by this
+project's code, both fixed by the same thing:**
+
+1. **A different, unrelated project is *also* named `jarvis`** (the NanoResearch
+   self-evolving-agent one, subcommands `run/maintain/resume/optimize/serve/digest/
+   migrate-store/selflearn`) and an old editable install
+   (`_editable_impl_nanoresearch.pth`) puts its directory on the global Python
+   installation's `sys.path`. The global `jarvis` command and even bare `python -c
+   "import jarvis"` resolve to **the wrong package** depending on CWD and install order.
+   This is not fixable by reinstalling `jarvis-corpus` — the collision is structural.
+2. **C: was nearly full (96% used, 11GB free)** before this project added anything, and
+   installing `docling`/`torch`/`sentence-transformers` globally would have made that
+   materially worse.
+
+**The fix for both: a dedicated virtualenv on D:, already created.**
+
+```
+.venv/                    # at the repo root, gitignored (already in .gitignore)
+```
+
+Created with `python -m venv .venv` (no `--system-site-packages`, for full isolation from
+the NanoResearch collision) and `pip install -e ".[llm,parse,index,verify,mcp,gcp,dev]"`
+into it. All extras are installed — `docling`, `torch`, `sentence-transformers`,
+`transformers`, `openai`, `google-auth`, `mcp`. **Use `.venv\Scripts\jarvis.exe` (or
+activate the venv first), never the bare global `jarvis` command or `python -c "import
+jarvis"` without first confirming `sys.path`/cwd.**
+
+**Real GCP config that works**, for reference (this exact combination produced the run
+above):
+
+```
+JARVIS_GCP_CREDENTIALS=<path to a real service-account JSON key>
+JARVIS_PROVIDER=gcp
+JARVIS_MODEL_SYNTHESIS=google/gemini-3.7-flash
+JARVIS_MODEL_CARD_EXTRACTION=google/gemini-3.7-flash
+JARVIS_MODEL_RETRIEVAL_REFINE=google/gemini-3.7-flash
+JARVIS_MODEL_QUERY_EXPANSION=google/gemini-3.7-flash
+JARVIS_MODEL_SCREEN_VOTE=google/gemini-3.7-flash
+TORCH_COMPILE_DISABLE=1
+JARVIS_PROJECT_ROOT=<a project root — .dev-local/projects if kept in-repo>
+```
+
+`JARVIS_GCP_PROJECT`/`JARVIS_GCP_LOCATION` were deliberately left unset in this run and it
+worked anyway — project id auto-detected from the credentials file, location defaulted to
+`global`. Both are real, working fallbacks, not just designed ones, as of this run.
+
 ## What changed since the last handoff
 
-**`cli-and-operations` was merged into `main` and pushed.** Verified independently rather
-than taken on trust before merging: full suite re-run on the branch (631 passing, exit 0)
-and again on `main` itself after the merge (631 passing, exit 0, no conflicts), `ruff
-check .` at the 11-violation baseline, and the ledger's specific claims spot-checked
-directly against the actual code — the `%PDF` magic-byte check really is in `fetch.py`,
-`cost_usd` really is written via `router.cost.total_cost` in a `finally`, `extract_and_verify`
-really is called from `cmd_gather`, both Important fixes (whitespace-credential stripping,
-`--project` path-traversal containment) really are in place, and `scan_corpus`'s existing
-`_dedupe_claim_ids` guard really does cover claims loaded from the new JSON sidecar. The
-merged worktree and local branch were removed afterward.
+**Three things landed, in order, all directly in response to preparing for and then
+running the first real gather: `multi-provider-llm` merged, `--max-deep` added, then the
+live run itself (see above).**
 
-**The system can now be operated end to end from one command, `jarvis`**:
+**`multi-provider-llm` (merged, `793ee36`)**: `jarvis.router` gained a provider dimension
+alongside its existing model routing — `route(task)` still says which model name,
+`provider_for(task)` now says which backend (`openai`/`azure`/`gcp`), resolved
+independently via `JARVIS_PROVIDER`/`JARVIS_PROVIDER_<TASK>`. `jarvis/llm.py` gained three
+client builders behind one call shape. The `gcp` path is the one that's actually been
+proven live (see above); `azure` and DeepSeek-as-`openai` are implemented and unit-tested
+but not yet exercised against a real endpoint. **A real bug was found and fixed before
+shipping**: `cmd_gather`/`cmd_ask`/`cmd_report` each constructed `ModelRouter` directly
+instead of through `build_router()`, silently dropping all provider config — caught while
+preparing to test GCP through the actual CLI, not by any review. Fixed with a regression
+test that asserts the call site itself, not just that the feature works end to end
+(existing tests all monkeypatch `build_writer`/etc. directly and would never have caught
+this). This branch was built and tested directly rather than through the full
+subagent-driven-development ceremony (worktree + task-by-task review + final adversarial
+review) — smaller, more exploratory scope, so treat its rigor accordingly: solid tests,
+no independent adversarial review.
+
+**`--max-deep` (merged, `dacb602`)**: added *because* the first real gather immediately
+showed the gate keeps 100% of candidates pre-calibration, meaning `--yes` had no cost
+control at all. Papers past the cap stay at `pending_deep` and are picked up by a later
+`gather` run on the same project — composes with the existing resumability path rather
+than needing its own bookkeeping.
+
+**Also fixed**: the global Python install's `jarvis-corpus` editable link pointed at a
+worktree deleted months ago, silently broken for a long time before anyone noticed (see
+"Environment setup" above for the real fix — a dedicated venv, not just a reinstall).
+
+**Earlier, still true**: `cli-and-operations` was merged into `main` and pushed, verified
+independently rather than taken on trust before merging. The system can now be operated
+end to end from one command, `jarvis`:
 `jarvis status/gather/ask/report/contradictions/review/calibrate/mcp`. Three real pipeline
 gaps found by reading the code (not the plans) were closed as part of this build:
 
@@ -83,13 +207,16 @@ check it directly, the way a pre-flight scan checks every other interface assump
 
 ## What is built
 
-All ten of the original design spec's build steps, plus the CLI operator surface over all
-of them. **All on `main`.**
+All ten of the original design spec's build steps, the CLI operator surface, and
+multi-provider chat support. **All on `main`, and now proven against a real corpus.**
 
 | Component | Status | Modules |
 |---|---|---|
 | Spec build steps 1-10 | done, `main` | see prior handoff versions / `LEDGER*.md` files on `main` |
-| CLI (spec `2026-08-15-cli-and-operations.md`) | **done, `main`** | `cli.py`, `fetch.py` |
+| CLI (spec `2026-08-15-cli-and-operations.md`) | done, `main` | `cli.py`, `fetch.py` |
+| Multi-provider chat (`openai`/`azure`/`gcp`) | done, `main` | `router.py`, `llm.py`, `config.py` |
+| `--max-deep` cost control | done, `main` | `cli.py` |
+| **Proven live**: gather → screen → deep-read → ask → verify | **done, this session** | see "THE FIRST REAL RUN" above |
 
 ## The CLI's adversarial review — worth reading in full before touching cli.py or fetch.py
 
@@ -124,26 +251,30 @@ Important, 2 Minor findings, all independently reproduced live:
 
 ## There are no remaining implementation plans
 
-Both the original ten-step design spec and the CLI spec have complete implementations, all
-merged and pushed. Nothing else is currently planned. What comes next is the measurement
-work the whole build order has been blocked on — see below.
+The original ten-step design spec, the CLI spec, and multi-provider chat all have complete
+implementations, all merged and pushed, all proven live. Nothing else is currently
+planned. What comes next is scaling up the real run and the measurement work it unblocks.
 
 ## What comes next — READ THIS FIRST IF YOU ARE PICKING THIS UP
 
-1. **Run a real gather on a real research question.** This is the system's first live
-   run of any kind. Every `LLM*` class (`LLMPlanner`, `LLMVoter`, `LLMCardExtractor`,
-   `LLMRefiner`, `LLMWriter`, `LLMOutliner`), `BGEEmbedder`, `HFNLI`, and `DoclingParser`
-   has only ever been exercised against fakes or type signatures. Expect this to be a
-   debugging exercise, not a measurement (the CLI spec's own risk table says so
-   explicitly). Start with a small `--budget` and `--limit`:
-   `jarvis gather "<question>" --project <name> --budget 20 --limit 10`.
-2. **Once a real corpus exists, measure contradiction precision against the 0.70 target**
-   (`jarvis contradictions` then `jarvis review` then read the printed number) — the one
-   metric the entire spec build order has never been able to produce without a real
-   corpus. This is the single most important open question left in this whole project.
-3. **Work through the Loose ends list below** — none of it is spec-build or CLI-build
-   work, all of it is real, and some of it may become more urgent once a real corpus
-   exists (e.g. `jarvis.verify.quote_is_grounded`'s paper-level fallback).
+1. **Scale the real gather past 3 papers.** `gcp-smoke-test`
+   (`.dev-local/projects/gcp-smoke-test/corpus.db`) still has 176 candidates sitting at
+   `pending_deep` from the run documented above. Resuming with a larger `--max-deep` is
+   the fastest way to get more real fetch/parse/card data — no new search needed. Use the
+   exact env-var block in "Environment setup" above; it's proven, not theoretical.
+2. **Investigate the 2/3 fetch failure rate** on the tiny sample so far — one candidate
+   had no `pdf_url` at all, one only had a DOI-redirect landing page. Worth checking
+   whether `sources.py`'s adapters could resolve a real PDF URL for the DOI case (e.g. via
+   Unpaywall, which `fetch.py` already falls back to) before assuming this rate holds.
+3. **Once the corpus is bigger, try `jarvis report`** — untested live so far; needs
+   multiple cards to be meaningful, unlike the single-paper `ask()` test above.
+4. **Once a real corpus exists at scale, measure contradiction precision against the 0.70
+   target** (`jarvis contradictions` then `jarvis review`) — the one metric the entire
+   spec build order has never been able to produce. Needs papers that actually disagree,
+   which a single-topic 3-paper corpus is unlikely to have.
+5. **Run `jarvis calibrate`** once there's enough of a corpus to hand-label a seed set —
+   this is what would fix the 179/179-kept behavior and give `--max-deep` less to do.
+6. **Work through the Loose ends list below.**
 
 ## How to execute a plan (kept for reference — none currently exist)
 
@@ -254,7 +385,26 @@ work the whole build order has been blocked on — see below.
 - **There is a completely unrelated repo at
   `D:\LionXdrones\r&d\AiFlightLogAnalyser\NanoResearch\jarvis`** — own GitHub remote, own
   `main`, no branches from this project. Stop and confirm which repo is meant before
-  mutating anything if a path resembles that one.
+  mutating anything if a path resembles that one. **This is worse than a path-confusion
+  risk**: an old editable install (`_editable_impl_nanoresearch.pth` in the global Python
+  install's site-packages) puts that whole directory on `sys.path`, and it has its own
+  `jarvis/` package — so the global `jarvis` command and even bare `python -c "import
+  jarvis"` can silently resolve to *the wrong project's code* depending on CWD and install
+  order. Confirmed live: this is exactly what happened before the `.venv` fix below
+  existed. Always use `.venv\Scripts\jarvis.exe` from this repo, never the global command.
+
+- **`torch.compile` cannot work on this Windows machine** — MSVC has no `omp.h`, so any
+  `torch.compile`-JIT-backed model fails with `CppCompileError` on first real use (hit via
+  Docling's RT-DETR layout model). Set `TORCH_COMPILE_DISABLE=1` before running anything
+  that touches `torch`/`transformers`/`docling` for real. Confirmed this is a widely-known
+  general PyTorch-on-Windows issue, not specific to this project.
+
+- **The global Python install had a stale `jarvis-corpus` editable link** pointing at a
+  worktree deleted months ago (`verifiable-single-paper-core`) — the real `jarvis` command
+  was broken globally and nobody had noticed, because every test run resolves the local
+  package from whatever worktree pytest's `rootdir` happens to be. Fixed by creating an
+  isolated `.venv/` (see "Environment setup" above) rather than just reinstalling — a
+  reinstall alone would not have fixed the NanoResearch name collision above.
 
 - **`python -m pytest -q | grep passed` returns nothing** in this shell — CR-terminated
   progress output. Use `--junit-xml` and read `tests=`/`failures=`, exit code, or
@@ -277,57 +427,63 @@ work the whole build order has been blocked on — see below.
 
 ## Loose ends
 
-- **The system has never been run against a real corpus.** This is now the single most
-  important remaining item — see "What comes next" above. No amount of further code
-  closes this; it needs a real gather run.
+- **The gate keeps 179/179 pre-calibration — expected, but means `--max-deep` is the only
+  cost control that currently exists.** `jarvis calibrate` against a hand-labeled seed set
+  is the real fix; nobody has run it yet. See "What comes next" above.
 - **The one number this entire project has never been able to produce: measured
-  contradiction precision on a real corpus.** Blocked on the above.
-- **`jarvis/retriever.py`'s RRF cross-round fix has no real regression test** — still open.
+  contradiction precision on a real corpus.** Still blocked — needs a corpus with papers
+  that actually disagree, which the current 1-paper `gcp-smoke-test` corpus can't provide.
+- **Real fetch success rate so far: 2/3 failed, on a sample far too small to generalize
+  from.** Worth tracking as `--max-deep` scales up on `gcp-smoke-test`.
+- **`azure` and DeepSeek-as-`openai` providers are implemented and unit-tested but not
+  yet exercised live** — only `gcp` has been proven against a real endpoint so far.
+- **`jarvis/retriever.py`'s RRF cross-round fix has no real regression test** — still open,
+  unrelated to anything in this update.
 - **`main` has a public remote and is being pushed to.** Flag any future push as the
   outbound, semi-irreversible action it is.
-- **One spec §10 metric was unclaimed for a long time and is now claimed but unmeasured**:
-  cost per project. `cmd_gather` now writes `runs.cost_usd` on every run, but no real run
-  has happened yet to produce a real number.
 - **`jarvis.verify.quote_is_grounded`'s paper-level fallback** — real, pre-existing gap,
-  inherited as-is by every downstream consumer (`verify_quote` MCP tool, `draft_section`,
-  `scan_claim`, and now every CLI command that touches verification). Worth a dedicated
-  small follow-up against `verify.py` directly, and worth checking again once a real
-  corpus exists to see how often it actually matters in practice.
+  inherited as-is by every downstream consumer. Not yet known to have actually triggered
+  on the one real paper ingested so far (single-paper corpus, so no cross-paper quote
+  collision was possible) — worth watching once the corpus has more than one paper.
 - **`list_papers`'s N+1 query pattern and missing total/has_more fields** and
   **`save_contradictions`' UPSERT-only staleness** — both real, both low-frequency, both
   parked with documented reasoning in their respective ledgers.
 - **`FakeEmbedder`'s missing relevance floor** — five occurrences across branches. Worth
   adding an opt-in floor to the fixture directly if a future branch hits it again.
-- **Every `LLM*` class, `BGEEmbedder`, `HFNLI`, `DoclingParser`, and the `--with-models`
-  path of `jarvis/mcp_server.py` are tested against fakes/type-signatures only** — none
-  has been exercised against a real model endpoint or a real PDF, on this branch or any
-  before it. The CLI's own fail-loud contract (this branch's whole reason for existing)
-  is itself untested against a real, reachable, correctly-authenticated endpoint — only
-  against the absence of credentials/extras. This is the most direct path to closing this
-  loose end: run `jarvis gather` for real.
+- **`LLMPlanner`/`LLMVoter`/`LLMRefiner`/`LLMOutliner`, `BGEEmbedder`, `HFNLI`, and the
+  `--with-models` path of `jarvis/mcp_server.py` are still tested against fakes only** —
+  `LLMWriter` and `LLMCardExtractor` are the two that have now been proven live (via
+  `synthesis` and `card_extraction`); the rest haven't been exercised in this project's
+  own CLI yet, though the same `chat()`/provider machinery underlies all of them.
 - **This file is tracked on `main`**. Every `LEDGER-*.md` remains the authoritative
   per-branch record; this file is the cross-branch orientation layer.
 
 ## Open questions the spec asks and the code has not yet answered
 
-Design spec §15 and CLI spec §12, still open:
+Design spec §15 and CLI spec §12:
 
-1. **Which NLI model.** `HFNLI` defaults to `DeBERTa-v3-base-mnli-fever-anli`, unchanged.
+1. **Which NLI model.** `HFNLI` defaults to `DeBERTa-v3-base-mnli-fever-anli` — now
+   proven live: correctly distinguished two SUPPORTED claims from one NEUTRAL
+   ("quote is real but does not clearly support the claim") on the first real `ask()`
+   run. No comparison against alternatives has been done; the default has just been
+   confirmed to *work*, not shown to be optimal.
 2. **VLM descriptions for figures.** Still caption + referring text only, unmeasured.
 3. **Gate calibration transfer.** `calibration_report` can score one project's thresholds
    against another project's labels directly — nobody has run this comparison yet.
 4. **Reranker: local vs hosted.** Still unmeasured.
-5. **Contradiction detection precision on a real corpus.** Still the most important open
-   question — blocked on the first real gather.
-6. **Does Docling accept a URL directly?** Answered empirically during the CLI build
-   (yes — confirmed via Docling's own published examples) — kept here since it was a
-   named open question, now resolved.
-7. **What is the real fetch success rate on a typical 100-300 candidate gather?** Still
-   unknown; needs a real run.
+5. **Contradiction detection precision on a real corpus.** Still the most important
+   remaining open question — needs a bigger, more varied corpus than exists yet.
+6. **Does Docling accept a URL directly?** Resolved — moot in practice: real testing
+   showed the fetch step is still needed regardless (parser escalation, re-parse without
+   re-fetch, a meaningful `source_path`), and the URL question was never actually the
+   blocker — `torch.compile`/OpenMP was.
+7. **What is the real fetch success rate on a typical 100-300 candidate gather?**
+   First real data point: **2/3 failed on this tiny sample** (no `pdf_url` at all; a
+   DOI-redirect landing page, not a direct PDF). Nowhere near enough data to generalize —
+   this is exactly why scaling up `--max-deep` on `gcp-smoke-test` is the next step.
 8. **Should card extraction be per-paper at ingest, or a batch pass afterward?** Built
-   per-paper (inside `cmd_gather`, immediately after each paper's successful ingest) —
-   this is now the actual answer in code, not just an open question, though its tradeoffs
-   against a batch pass haven't been measured against a real corpus yet.
+   per-paper, and now proven correct on real data: the one real card extracted had both
+   fields mechanically verified against real unit text, not just structurally valid.
 9. **§9's claim-source decision for corpus-wide contradiction scanning.** Built as "the
-   most recent report's claims sidecar, or an explicit `--from-report` path" — the spec's
-   own least-confident decision, worth revisiting once a real report exists.
+   most recent report's claims sidecar, or an explicit `--from-report` path" — still
+   unexercised live; needs `jarvis report` to actually run first.
