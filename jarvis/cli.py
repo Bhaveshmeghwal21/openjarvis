@@ -69,29 +69,45 @@ class ModelBuildError(RuntimeError):
     """
 
 
-def _require_chat_credentials(config: Config) -> None:
-    """`jarvis.llm.chat` reads `JARVIS_BASE_URL`/`JARVIS_API_KEY` from the environment
-    directly, not from a `Config` object -- checking `config`'s own copy of the same
-    values here (populated from the same environment by `Config.load()`) fails loud
-    before any `LLM*` class's own `try/except` around `chat_fn()` would otherwise
-    swallow the resulting `openai` error and quietly fall back to an empty/neutral
-    result that looks like "no evidence" rather than "misconfigured".
+def _require_nonblank(value: str | None, name: str) -> None:
+    if not (value or "").strip():
+        raise ModelBuildError(
+            f"{name} is not set — required to construct a real model client"
+        )
 
-    Strips before checking: a whitespace-only value (`JARVIS_API_KEY="   "`, a realistic
-    copy-paste artifact from a shell export) is truthy in Python and would otherwise pass
-    this check, reach `openai.OpenAI(...)`, fail there with a connection/auth error inside
+
+def _require_chat_credentials(config: Config, task: str) -> None:
+    """`jarvis.llm.chat` resolves each task's provider and reads that provider's
+    credentials from the environment directly, not from a `Config` object -- checking
+    `config`'s own copy of the same values here (populated from the same environment by
+    `Config.load()`) fails loud before any `LLM*` class's own `try/except` around
+    `chat_fn()` would otherwise swallow the resulting client error and quietly fall back
+    to an empty/neutral result that looks like "no evidence" rather than "misconfigured".
+
+    `task` selects which provider's requirements apply — a task routed to `azure` needs
+    `JARVIS_API_VERSION` in addition to the base URL/key; a task routed to `gcp` needs the
+    service-account credentials file instead of an API key at all, and nothing else --
+    `jarvis.llm._gcp_client` falls back to the project id embedded in that file when
+    `JARVIS_GCP_PROJECT` isn't set, so this check must not require it either or it would
+    block a configuration that actually works at runtime. Strips every value before
+    checking: a whitespace-only value (`JARVIS_API_KEY="   "`, a realistic copy-paste
+    artifact from a shell export) is truthy in Python and would otherwise pass a bare
+    `if not` check, reach the real client, fail there with a connection/auth error inside
     an `LLM*` class's own broad `except Exception`, and silently produce the exact
     "empty draft, looks like no evidence" outcome this check exists to prevent —
     contradicting the fail-loud contract this function is named for.
     """
-    if not (config.base_url or "").strip():
-        raise ModelBuildError(
-            "JARVIS_BASE_URL is not set — required to construct a real model client"
-        )
-    if not (config.api_key or "").strip():
-        raise ModelBuildError(
-            "JARVIS_API_KEY is not set — required to construct a real model client"
-        )
+    provider = config.provider_for(task)
+    if provider == "azure":
+        _require_nonblank(config.base_url, "JARVIS_BASE_URL")
+        _require_nonblank(config.api_key, "JARVIS_API_KEY")
+        _require_nonblank(config.api_version, "JARVIS_API_VERSION")
+        return
+    if provider == "gcp":
+        _require_nonblank(config.gcp_credentials_path, "JARVIS_GCP_CREDENTIALS")
+        return
+    _require_nonblank(config.base_url, "JARVIS_BASE_URL")
+    _require_nonblank(config.api_key, "JARVIS_API_KEY")
 
 
 def _require_importable(module: str, extra: str) -> None:
@@ -108,41 +124,42 @@ def _require_importable(module: str, extra: str) -> None:
 def build_router(config: Config):
     """Always constructible: no model call happens until `.route()`/`chat()` is used."""
     from jarvis.router import ModelRouter
-    return ModelRouter(overrides=config.model_overrides)
+    return ModelRouter(overrides=config.model_overrides, provider=config.provider,
+                       provider_overrides=config.provider_overrides)
 
 
 def build_writer(config: Config, router):
-    _require_chat_credentials(config)
+    _require_chat_credentials(config, "synthesis")
     from jarvis.writer import LLMWriter
     return LLMWriter(router)
 
 
 def build_planner(config: Config, router):
-    _require_chat_credentials(config)
+    _require_chat_credentials(config, "query_expansion")
     from jarvis.gather import LLMPlanner
     return LLMPlanner(router)
 
 
 def build_voter(config: Config, router):
-    _require_chat_credentials(config)
+    _require_chat_credentials(config, "screen_vote")
     from jarvis.gate import LLMVoter
     return LLMVoter(router)
 
 
 def build_card_extractor(config: Config, router):
-    _require_chat_credentials(config)
+    _require_chat_credentials(config, "card_extraction")
     from jarvis.card import LLMCardExtractor
     return LLMCardExtractor(router)
 
 
 def build_refiner(config: Config, router):
-    _require_chat_credentials(config)
+    _require_chat_credentials(config, "retrieval_refine")
     from jarvis.retriever import LLMRefiner
     return LLMRefiner(router)
 
 
 def build_outliner(config: Config, router):
-    _require_chat_credentials(config)
+    _require_chat_credentials(config, "outline")
     from jarvis.outline import LLMOutliner
     return LLMOutliner(router)
 
