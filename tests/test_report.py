@@ -211,3 +211,119 @@ def test_duplicates_are_reportable_not_only_removed():
 
 def test_integrating_nothing_is_nothing():
     assert integrate([]) == []
+
+
+from jarvis.models import Card, CardField
+from jarvis.outline import Outline, TemplateOutliner
+from jarvis.report import corpus_cards, evaluate_report, write_report
+from jarvis.store import save_card
+
+
+def test_a_report_covers_every_section_of_its_outline(corpus):
+    outline = Outline(topic="gusts", sections=(
+        Section(title="Results", question="what accuracy is reported?"),
+        Section(title="Limits", question="what are the wind speed limits?"),
+    ))
+    result = write_report(corpus, "gusts", outline, FakeEmbedder(), FakeWriter({}), ENTAILS)
+    assert [s.section.title for s in result.sections] == ["Results", "Limits"]
+
+
+def test_a_report_can_build_its_own_outline_from_cards(corpus):
+    save_card(corpus, Card(paper_id="p1",
+                           problem=CardField("gust rejection", "u1", "q"),
+                           metrics=(CardField("94.2", "u2", "q"),)))
+    result = write_report(corpus, "gusts", TemplateOutliner(), FakeEmbedder(),
+                          FakeWriter({}), ENTAILS)
+    assert len(result.sections) >= 2
+    assert result.outline.topic == "gusts"
+
+
+def test_corpus_cards_reads_every_deep_paper_that_has_one(corpus):
+    save_card(corpus, Card(paper_id="p1", problem=CardField("a", "u1", "q")))
+    cards = corpus_cards(corpus)
+    assert [c.paper_id for c in cards] == ["p1"]
+
+
+def test_coverage_is_the_cited_fraction_of_the_deep_corpus(corpus):
+    unit = _unit(corpus, "p1", "94.2")
+    question = "what accuracy is reported?"
+    writer = FakeWriter({question: Draft(
+        text="t", claims=(Claim("c-0", "94.2%", unit.unit_id, "94.2% tracking accuracy"),))})
+    outline = Outline(topic="gusts", sections=(Section(title="R", question=question),))
+
+    result = write_report(corpus, "gusts", outline, FakeEmbedder(), writer, ENTAILS)
+    assert 0.0 < result.coverage < 1.0
+    assert result.corpus_units > 1
+
+
+def test_coverage_is_zero_when_nothing_is_cited(corpus):
+    outline = Outline(topic="gusts", sections=(Section(title="R", question="q"),))
+    result = write_report(corpus, "gusts", outline, FakeEmbedder(), FakeWriter({}), ENTAILS)
+    assert result.coverage == 0.0
+
+
+def test_a_blocked_claim_does_not_count_toward_coverage(corpus):
+    unit = _unit(corpus, "p1", "94.2")
+    question = "what accuracy is reported?"
+    writer = FakeWriter({question: Draft(
+        text="t", claims=(Claim("c-0", "99.9%", unit.unit_id, "99.9% tracking accuracy"),))})
+    outline = Outline(topic="gusts", sections=(Section(title="R", question=question),))
+
+    result = write_report(corpus, "gusts", outline, FakeEmbedder(), writer, ENTAILS)
+    assert result.coverage == 0.0, "an ungrounded citation is not coverage"
+
+
+def test_the_report_deduplicates_claims_across_sections(corpus):
+    unit = _unit(corpus, "p1", "94.2")
+    claim_text = "The controller reaches 94.2%."
+    writer = FakeWriter({
+        "q1": Draft(text="t", claims=(Claim("a-0", claim_text, unit.unit_id,
+                                            "94.2% tracking accuracy"),)),
+        "q2": Draft(text="t", claims=(Claim("b-0", claim_text, unit.unit_id,
+                                            "94.2% tracking accuracy"),)),
+    })
+    outline = Outline(topic="t", sections=(Section(title="A", question="q1"),
+                                           Section(title="B", question="q2")))
+    result = write_report(corpus, "t", outline, FakeEmbedder(), writer, ENTAILS)
+    assert len(result.all_claims) == 1
+
+
+def test_the_report_aggregates_every_verification(corpus):
+    unit = _unit(corpus, "p1", "94.2")
+    writer = FakeWriter({"q1": Draft(text="t", claims=(
+        Claim("a-0", "good", unit.unit_id, "94.2% tracking accuracy"),
+        Claim("a-1", "bad", unit.unit_id, "99.9% tracking accuracy")))})
+    outline = Outline(topic="t", sections=(Section(title="A", question="q1"),))
+
+    result = write_report(corpus, "t", outline, FakeEmbedder(), writer, ENTAILS)
+    assert len(result.all_verifications) == 2
+
+
+def test_the_report_evaluates_like_any_other_answer(corpus):
+    unit = _unit(corpus, "p1", "94.2")
+    writer = FakeWriter({"q1": Draft(text="t", claims=(
+        Claim("a-0", "good", unit.unit_id, "94.2% tracking accuracy"),
+        Claim("a-1", "bad", unit.unit_id, "99.9% tracking accuracy")))})
+    outline = Outline(topic="t", sections=(Section(title="A", question="q1"),))
+
+    evaluation = evaluate_report(write_report(corpus, "t", outline, FakeEmbedder(),
+                                              writer, ENTAILS))
+    assert evaluation.quote_fidelity == pytest.approx(0.5)
+    assert evaluation.meets_quote_target is False
+    assert evaluation.coverage is not None
+
+
+def test_cited_paper_ids_lists_only_papers_with_a_supported_claim(corpus):
+    unit = _unit(corpus, "p1", "94.2")
+    writer = FakeWriter({"q1": Draft(text="t", claims=(
+        Claim("a-0", "good", unit.unit_id, "94.2% tracking accuracy"),))})
+    outline = Outline(topic="t", sections=(Section(title="A", question="q1"),))
+    result = write_report(corpus, "t", outline, FakeEmbedder(), writer, ENTAILS)
+    assert result.cited_paper_ids == {"p1"}
+
+
+def test_report_is_frozen(corpus):
+    outline = Outline(topic="t", sections=())
+    result = write_report(corpus, "t", outline, FakeEmbedder(), FakeWriter({}), ENTAILS)
+    with pytest.raises(FrozenInstanceError):
+        result.coverage = 1.0

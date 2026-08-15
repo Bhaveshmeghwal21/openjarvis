@@ -16,11 +16,14 @@ from collections.abc import Sequence
 from dataclasses import dataclass, replace
 
 from jarvis.embed import Embedder
+from jarvis.evaluate import EvalReport, coverage
+from jarvis.evaluate import report as eval_report
 from jarvis.evidence import MAX_TOKENS, MAX_UNITS, cap, order_for_context
-from jarvis.models import Claim, Unit, Verdict, Verification
-from jarvis.outline import Section
+from jarvis.models import Card, Claim, Unit, Verdict, Verification
+from jarvis.outline import Outline, Outliner, Section
 from jarvis.retrieve import Reranker
 from jarvis.retriever import Refiner, retrieve_iteratively
+from jarvis.store import all_units, get_card, get_papers_by_depth
 from jarvis.text import normalize
 from jarvis.verify import NLIModel, verify_claim
 from jarvis.writer import Writer
@@ -130,3 +133,88 @@ def duplicate_claims(drafts: Sequence[SectionDraft]) -> list[tuple[str, str]]:
             else:
                 seen.add(key)
     return dropped
+
+
+@dataclass(frozen=True)
+class Report:
+    topic: str
+    outline: Outline
+    sections: tuple[SectionDraft, ...] = ()
+    coverage: float = 0.0
+    corpus_unit_ids: tuple[str, ...] = ()
+
+    @property
+    def corpus_units(self) -> int:
+        return len(self.corpus_unit_ids)
+
+    @property
+    def all_claims(self) -> tuple[Claim, ...]:
+        return tuple(c for s in self.sections for c in s.claims)
+
+    @property
+    def all_verifications(self) -> tuple[Verification, ...]:
+        return tuple(v for s in self.sections for v in s.verifications)
+
+    @property
+    def cited_unit_ids(self) -> set[str]:
+        """Units backing a SUPPORTED claim. A blocked citation is not coverage."""
+        return {v.unit_id for v in self.all_verifications if v.verdict is Verdict.SUPPORTED}
+
+    @property
+    def cited_paper_ids(self) -> set[str]:
+        """Papers behind a supported claim, resolved through the units the sections saw.
+
+        Deliberately not parsed out of `unit_id`. That id is
+        f"{paper_id}:{type}:{page}:{ordinal}", and `citation_graph.paper_id` falls back to
+        a title prefix when a paper has no arXiv or S2 id — titles routinely contain
+        colons ("Attention: All You Need"), so splitting on the first one would silently
+        truncate the paper.
+        """
+        cited = self.cited_unit_ids
+        return {u.paper_id for s in self.sections for u in s.units if u.unit_id in cited}
+
+
+def corpus_cards(conn: sqlite3.Connection) -> list[Card]:
+    """Every Layer 2 card in the deep-read corpus — the outliner's input."""
+    cards: list[Card] = []
+    for paper in get_papers_by_depth(conn, "deep"):
+        card = get_card(conn, paper.paper_id)
+        if card is not None:
+            cards.append(card)
+    return cards
+
+
+def write_report(conn: sqlite3.Connection, topic: str, outliner: Outliner | Outline,
+                 embedder: Embedder, writer: Writer, nli: NLIModel, *,
+                 refiner: Refiner | None = None, rounds: int = 2, limit: int = 8,
+                 reranker: Reranker | None = None, max_units: int = MAX_UNITS,
+                 max_tokens: int = MAX_TOKENS, threshold: float = 0.5) -> Report:
+    """Outline, draft each section independently, integrate, measure coverage.
+
+    `outliner` may be an `Outliner` or an already-built `Outline`, so a caller can inspect
+    or hand-edit the plan before spending a model call per section on it.
+    """
+    outline = outliner if isinstance(outliner, Outline) \
+        else outliner.outline(topic, corpus_cards(conn))
+
+    drafts = [draft_section(conn, section, embedder, writer, nli, refiner=refiner,
+                            rounds=rounds, limit=limit, reranker=reranker,
+                            max_units=max_units, max_tokens=max_tokens,
+                            threshold=threshold)
+              for section in outline.sections]
+    sections = tuple(integrate(drafts))
+
+    deep_ids = {p.paper_id for p in get_papers_by_depth(conn, "deep")}
+    corpus_unit_ids = [u.unit_id for u in all_units(conn) if u.paper_id in deep_ids]
+    cited = {v.unit_id for s in sections for v in s.supported}
+
+    return Report(topic=outline.topic, outline=outline, sections=sections,
+                  coverage=coverage(cited, corpus_unit_ids),
+                  corpus_unit_ids=tuple(corpus_unit_ids))
+
+
+def evaluate_report(report: Report) -> EvalReport:
+    """Spec §10 metrics over the whole report. A long report gets no leniency."""
+    return eval_report(list(report.all_verifications),
+                       cited=report.cited_unit_ids,
+                       corpus=report.corpus_unit_ids)
