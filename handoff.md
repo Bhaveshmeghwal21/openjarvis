@@ -257,21 +257,23 @@ planned. What comes next is scaling up the real run and the measurement work it 
 
 ## What comes next — READ THIS FIRST IF YOU ARE PICKING THIS UP
 
-1. **Scale the real gather past 3 papers.** `gcp-smoke-test`
-   (`.dev-local/projects/gcp-smoke-test/corpus.db`) still has 176 candidates sitting at
-   `pending_deep` from the run documented above. Resuming with a larger `--max-deep` is
-   the fastest way to get more real fetch/parse/card data — no new search needed. Use the
-   exact env-var block in "Environment setup" above; it's proven, not theoretical.
-2. **Investigate the 2/3 fetch failure rate** on the tiny sample so far — one candidate
-   had no `pdf_url` at all, one only had a DOI-redirect landing page. Worth checking
-   whether `sources.py`'s adapters could resolve a real PDF URL for the DOI case (e.g. via
-   Unpaywall, which `fetch.py` already falls back to) before assuming this rate holds.
-3. **Once the corpus is bigger, try `jarvis report`** — untested live so far; needs
-   multiple cards to be meaningful, unlike the single-paper `ask()` test above.
+1. **Keep scaling the real gather.** `gcp-smoke-test`
+   (`.dev-local/projects/gcp-smoke-test/corpus.db`) still has **177 candidates** sitting
+   at `pending_deep` after two `--max-deep` rounds (2 papers now fully deep-read out of
+   23 attempted, ~9% real fetch success rate — see Loose ends for the root cause found and
+   fixed, and what's left that's genuinely unfixable at this layer). Resuming with a
+   larger `--max-deep` is the fastest way to get more real fetch/parse/card data — no new
+   search needed. Use the exact env-var block in "Environment setup" above.
+2. **Check whether Unpaywall resolution actually works** — every candidate whose direct
+   fetch succeeded so far had a real `pdf_url` already; the DOI-only fallback path through
+   `make_unpaywall_pdf` has not been confirmed to succeed even once yet.
+3. **Once the corpus has enough cards, try `jarvis report`** — untested live so far; needs
+   multiple cards to be meaningful, unlike the single-paper `ask()` test above. 2 cards
+   exist now; probably still too few.
 4. **Once a real corpus exists at scale, measure contradiction precision against the 0.70
    target** (`jarvis contradictions` then `jarvis review`) — the one metric the entire
    spec build order has never been able to produce. Needs papers that actually disagree,
-   which a single-topic 3-paper corpus is unlikely to have.
+   which a single-topic corpus this small is unlikely to have yet.
 5. **Run `jarvis calibrate`** once there's enough of a corpus to hand-label a seed set —
    this is what would fix the 179/179-kept behavior and give `--max-deep` less to do.
 6. **Work through the Loose ends list below.**
@@ -432,9 +434,21 @@ planned. What comes next is scaling up the real run and the measurement work it 
   is the real fix; nobody has run it yet. See "What comes next" above.
 - **The one number this entire project has never been able to produce: measured
   contradiction precision on a real corpus.** Still blocked — needs a corpus with papers
-  that actually disagree, which the current 1-paper `gcp-smoke-test` corpus can't provide.
-- **Real fetch success rate so far: 2/3 failed, on a sample far too small to generalize
-  from.** Worth tracking as `--max-deep` scales up on `gcp-smoke-test`.
+  that actually disagree, which the current 2-paper `gcp-smoke-test` corpus can't provide.
+- **Real fetch success rate, updated: 2/23 succeeded (~9%) across two `--max-deep` rounds.**
+  Root-caused, not just observed: the biggest single cause was `fetch.py` sending httpx's
+  default User-Agent, which several publisher CDNs (confirmed: MDPI, via Akamai) block
+  outright with a bare 403 before any content is even served — fixed in `8f22ba3` (a
+  realistic browser UA + `follow_redirects=True`), and confirmed live to fix at least one
+  real case (`ewadirect.com`). What's left after that fix is genuine, not fixable at this
+  layer: some CDNs block on deeper signals than UA (MDPI still 403s even with a browser
+  UA — likely TLS-fingerprint-level, not worth chasing for a single-document fetch), some
+  hosts are simply unreachable (`scirp.org` timed out at the connection level), and many
+  candidates never had a direct `pdf_url` at all and depend on Unpaywall resolving their
+  DOI, which has not been separately verified to be working. **Next fetch-reliability step,
+  if this matters more than scaling further: check whether Unpaywall resolution itself is
+  working for the DOI-only candidates** — nobody has confirmed that path succeeds even
+  once yet, as opposed to the direct-`pdf_url` path which has (twice).
 - **`azure` and DeepSeek-as-`openai` providers are implemented and unit-tested but not
   yet exercised live** — only `gcp` has been proven against a real endpoint so far.
 - **`jarvis/retriever.py`'s RRF cross-round fix has no real regression test** — still open,
@@ -478,9 +492,11 @@ Design spec §15 and CLI spec §12:
    re-fetch, a meaningful `source_path`), and the URL question was never actually the
    blocker — `torch.compile`/OpenMP was.
 7. **What is the real fetch success rate on a typical 100-300 candidate gather?**
-   First real data point: **2/3 failed on this tiny sample** (no `pdf_url` at all; a
-   DOI-redirect landing page, not a direct PDF). Nowhere near enough data to generalize —
-   this is exactly why scaling up `--max-deep` on `gcp-smoke-test` is the next step.
+   Best data so far: **2/23 succeeded (~9%)** on this project, after fixing the biggest
+   single cause (a blocked User-Agent, see Loose ends). Still a small, single-topic
+   sample — genuinely low, or an artifact of this particular topic's publisher mix, is
+   not yet distinguishable. 177 candidates remain queued at `pending_deep` for whoever
+   wants a bigger sample.
 8. **Should card extraction be per-paper at ingest, or a batch pass afterward?** Built
    per-paper, and now proven correct on real data: the one real card extracted had both
    fields mechanically verified against real unit text, not just structurally valid.
