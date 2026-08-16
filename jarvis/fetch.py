@@ -16,7 +16,9 @@ importable, and its own tests run, with no network library required at import ti
 from __future__ import annotations
 
 import re
+from collections.abc import Iterator
 from pathlib import Path
+from urllib.parse import urljoin
 
 _PDF_MAGIC = b"%PDF"
 _TIMEOUT = 30
@@ -50,8 +52,13 @@ def _looks_like_pdf(content: bytes, content_type: str) -> bool:
     return content.lstrip()[:4] == _PDF_MAGIC
 
 
-def _download(url: str) -> bytes | None:
-    """One URL, one try plus one retry on a transient failure. Never raises."""
+def _fetch(url: str) -> tuple[bytes | None, bytes | None]:
+    """One URL, one try plus one retry on a transient failure. Never raises.
+
+    Returns `(pdf_bytes, html_bytes)` with at most one set. Separating "served something
+    that isn't a PDF" from "failed outright" is what lets a landing page be mined for the
+    real file below, rather than being discarded as a miss like every other non-PDF.
+    """
     import httpx
 
     for attempt in range(_MAX_ATTEMPTS):
@@ -61,31 +68,67 @@ def _download(url: str) -> bytes | None:
                 resp = client.get(url)
                 resp.raise_for_status()
                 content_type = resp.headers.get("content-type", "")
-                if not _looks_like_pdf(resp.content, content_type):
-                    return None
-                return resp.content
+                if _looks_like_pdf(resp.content, content_type):
+                    return resp.content, None
+                return None, resp.content
         except httpx.HTTPError:
             if attempt + 1 >= _MAX_ATTEMPTS:
-                return None
+                return None, None
             continue
+    return None, None
+
+
+# Publishers advertise the real file on the landing page in a `citation_pdf_url` meta tag
+# -- the same one Google Scholar and Zotero read. Both attribute orders occur in the wild.
+_CITATION_PDF_URL_PATTERNS = (
+    re.compile(rb"""<meta[^>]+name=["']citation_pdf_url["'][^>]+content=["']([^"']+)["']""",
+               re.IGNORECASE),
+    re.compile(rb"""<meta[^>]+content=["']([^"']+)["'][^>]+name=["']citation_pdf_url["']""",
+               re.IGNORECASE),
+)
+
+
+def _citation_pdf_url(html: bytes, base_url: str) -> str | None:
+    """The PDF a landing page points at, absolutised against the page's own URL.
+
+    Recovered a real 758KB PDF live for a DOI that otherwise fails outright, so this is
+    the publisher's intended route to the file rather than a way around anything.
+    """
+    for pattern in _CITATION_PDF_URL_PATTERNS:
+        match = pattern.search(html)
+        if match:
+            return urljoin(base_url, match.group(1).decode("utf-8", "replace"))
     return None
 
 
-def _candidate_urls(paper: dict, *, unpaywall_email: str) -> list[str]:
-    """Source order per spec §5.1: direct pdf_url, then a generic url, then Unpaywall by
-    DOI. Unpaywall's own network call is deferred until it's actually needed (no direct
-    url present) since it's a second network round-trip for a fallback path."""
-    urls = []
+def _candidate_urls(paper: dict, *, unpaywall_email: str) -> Iterator[str]:
+    """Yield candidate PDF URLs lazily, cheapest first (spec §5.1).
+
+    A generator rather than a list so each network-backed fallback costs a round-trip only
+    once every cheaper candidate has actually failed. The list version guarded OA
+    resolution with `if not urls`, which meant any paper carrying a `url` -- typically a
+    doi.org landing page that will never return a PDF -- skipped OA resolution entirely
+    and failed outright.
+
+    Order: direct `pdf_url`, generic `url`, then every OA location OpenAlex knows
+    (repository mirrors ahead of bot-walled publisher CDNs), then Unpaywall. OpenAlex
+    precedes Unpaywall because Unpaywall rejects an unverified email with HTTP 422, which
+    made it a dead path in every real run until now.
+    """
     if paper.get("pdf_url"):
-        urls.append(paper["pdf_url"])
+        yield paper["pdf_url"]
     if paper.get("url"):
-        urls.append(paper["url"])
-    if not urls and paper.get("doi"):
-        from jarvis.sources import make_unpaywall_pdf
-        resolved = make_unpaywall_pdf(unpaywall_email)(paper["doi"])
-        if resolved:
-            urls.append(resolved)
-    return urls
+        yield paper["url"]
+
+    doi = paper.get("doi")
+    if not doi:
+        return
+
+    from jarvis import sources
+    yield from sources.openalex_oa_urls(doi, mailto=unpaywall_email)
+    resolved = sources.make_unpaywall_pdf(unpaywall_email)(doi)
+    if resolved:
+        yield resolved
 
 
 def fetch_pdf(paper: dict, cache_dir: str | Path, *, unpaywall_email: str,
@@ -101,8 +144,21 @@ def fetch_pdf(paper: dict, cache_dir: str | Path, *, unpaywall_email: str,
     if target.is_file():
         return str(target)
 
+    tried: set[str] = set()
     for url in _candidate_urls(paper, unpaywall_email=unpaywall_email):
-        content = _download(url)
+        if url in tried:
+            continue
+        tried.add(url)
+
+        content, html = _fetch(url)
+        if content is None and html:
+            # Served something, just not a PDF. If it's a landing page it names the real
+            # file, which is the difference between a miss and a hit on a great many DOIs.
+            meta_url = _citation_pdf_url(html, url)
+            if meta_url and meta_url not in tried:
+                tried.add(meta_url)
+                content, _ = _fetch(meta_url)
+
         if content is not None:
             cache_dir.mkdir(parents=True, exist_ok=True)
             target.write_bytes(content)

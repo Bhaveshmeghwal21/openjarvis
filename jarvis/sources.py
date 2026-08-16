@@ -9,6 +9,7 @@ Ported from NanoResearch/jarvis/tools/sources.py.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from typing import Callable
 
 PAPER_FIELDS = (
@@ -105,6 +106,72 @@ def make_unpaywall_pdf(email: str) -> Callable[[str], str | None]:
         return loc.get("url_for_pdf") or None
 
     return pdf_for
+
+
+# Publisher CDNs that serve open-access papers but gate them behind bot detection.
+# Measured against the real corpus: MDPI answers an Akamai `bm-verify` interstitial and
+# Hindawi a Cloudflare challenge, on papers that are themselves free to read. Those same
+# papers are usually mirrored unguarded in an author's institutional repository, so a
+# walled URL stays a candidate -- it is simply tried after every alternative.
+_BOT_WALLED_HOSTS = (
+    "mdpi.com", "hindawi.com", "ieeexplore.ieee.org", "sciencedirect.com",
+    "onlinelibrary.wiley.com", "link.springer.com", "springer.com",
+    "tandfonline.com", "dl.acm.org",
+    # A DOI resolver inherits whatever wall the publisher it redirects to puts up.
+    "doi.org",
+)
+
+
+def rank_oa_urls(urls: Iterable[str]) -> list[str]:
+    """Dedup preserving first occurrence, then sink bot-walled publisher hosts to the back.
+
+    `sorted` is stable, so a False/True key moves the walled hosts without disturbing the
+    caller's ordering within either group.
+    """
+    ordered = list(dict.fromkeys(u for u in urls if u))
+    return sorted(ordered, key=lambda u: any(host in u for host in _BOT_WALLED_HOSTS))
+
+
+def openalex_oa_urls(doi: str, *, mailto: str = "") -> list[str]:
+    """Every route to a free copy OpenAlex knows for a DOI, most-fetchable first.
+
+    OpenAlex reports one `best_oa_location` plus a `locations` array, and most locations
+    carry only a `landing_page_url` -- the `pdf_url` field is populated for barely one
+    entry in six. Measured on a real gold-OA paper: six locations, of which exactly one
+    had a `pdf_url` (the publisher's own bot-walled copy) while the reachable repository
+    mirrors -- Bristol Research, Europe PMC, Zenodo, orbilu.uni.lu -- appeared only as
+    landing pages. Reading `pdf_url` alone therefore discards nearly every copy that
+    would actually have been served, which is why landing pages are returned too: the
+    fetch layer mines them for their `citation_pdf_url` meta tag.
+
+    Direct PDFs come first because they cost one request against a landing page's two.
+
+    Preferred over Unpaywall because Unpaywall rejects an unverified email with HTTP 422;
+    here `mailto` is optional and only buys the polite rate-limit pool.
+    """
+    if not doi:
+        return []
+    import httpx
+
+    params = {"mailto": mailto} if mailto else {}
+    try:
+        with httpx.Client(timeout=30) as client:
+            resp = client.get(f"https://api.openalex.org/works/doi:{doi}", params=params)
+            resp.raise_for_status()
+            work = resp.json()
+    except (httpx.HTTPError, ValueError):
+        return []
+
+    pdfs = [(work.get("best_oa_location") or {}).get("pdf_url")]
+    landings: list[str | None] = []
+    for loc in (work.get("locations") or []):
+        loc = loc or {}
+        pdfs.append(loc.get("pdf_url"))
+        landings.append(loc.get("landing_page_url"))
+
+    ranked_pdfs = rank_oa_urls(pdfs)
+    already = set(ranked_pdfs)
+    return ranked_pdfs + [u for u in rank_oa_urls(landings) if u not in already]
 
 
 def make_core_search(api_key: str, limit: int = 20) -> Callable[[str], list[dict]]:

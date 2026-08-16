@@ -96,6 +96,7 @@ def test_falls_back_to_unpaywall_by_doi_when_no_direct_url(tmp_path, monkeypatch
         return lambda doi: "http://oa.example.com/free.pdf" if doi == "10.1/x" else None
 
     monkeypatch.setattr("jarvis.sources.make_unpaywall_pdf", fake_unpaywall_pdf)
+    monkeypatch.setattr("jarvis.sources.openalex_oa_urls", lambda doi, mailto="": [])
     client = _FakeClient({"http://oa.example.com/free.pdf": _FakeResponse(_REAL_PDF_BYTES)})
     monkeypatch.setattr("httpx.Client", lambda **kw: client)
 
@@ -248,3 +249,116 @@ def test_redirects_are_followed(tmp_path, monkeypatch):
              unpaywall_email="me@example.com", paper_id="p1")
 
     assert captured_kwargs.get("follow_redirects") is True
+
+
+def test_openalex_is_tried_before_unpaywall(tmp_path, monkeypatch):
+    # Measured live: Unpaywall answers HTTP 422 for an empty *and* for an invented email,
+    # so that path had never resolved a single PDF in a real run. OpenAlex carries the same
+    # OA data with no email wall, so it is consulted first -- and reaching Unpaywall at all
+    # once OpenAlex has produced a working URL is a wasted round-trip.
+    cache_dir = tmp_path / "pdfs"
+
+    def boom_unpaywall(email):
+        raise AssertionError("Unpaywall must not be reached when OpenAlex succeeded")
+
+    monkeypatch.setattr("jarvis.sources.make_unpaywall_pdf", boom_unpaywall)
+    monkeypatch.setattr("jarvis.sources.openalex_oa_urls",
+                       lambda doi, mailto="": ["http://repo.edu/free.pdf"])
+    client = _FakeClient({"http://repo.edu/free.pdf": _FakeResponse(_REAL_PDF_BYTES)})
+    monkeypatch.setattr("httpx.Client", lambda **kw: client)
+
+    path = fetch_pdf({"doi": "10.1/x"}, cache_dir, unpaywall_email="me@example.com",
+                     paper_id="p1")
+    assert path is not None
+    assert client.calls == ["http://repo.edu/free.pdf"]
+
+
+def test_a_non_pdf_url_does_not_suppress_the_oa_fallback(tmp_path, monkeypatch):
+    # The bug this replaces: `_candidate_urls` guarded OA resolution with `if not urls`,
+    # so any paper carrying a `url` -- typically a doi.org landing page that will never
+    # return a PDF -- skipped OA resolution entirely and failed outright.
+    cache_dir = tmp_path / "pdfs"
+    monkeypatch.setattr("jarvis.sources.openalex_oa_urls",
+                       lambda doi, mailto="": ["http://repo.edu/free.pdf"])
+    client = _FakeClient({
+        "https://doi.org/10.1/x": _FakeResponse(_HTML_BYTES, content_type="text/html"),
+        "http://repo.edu/free.pdf": _FakeResponse(_REAL_PDF_BYTES),
+    })
+    monkeypatch.setattr("httpx.Client", lambda **kw: client)
+
+    path = fetch_pdf({"url": "https://doi.org/10.1/x", "doi": "10.1/x"}, cache_dir,
+                     unpaywall_email="me@example.com", paper_id="p1")
+    assert path is not None
+    assert Path(path).read_bytes() == _REAL_PDF_BYTES
+    assert "http://repo.edu/free.pdf" in client.calls
+
+
+def test_oa_resolution_is_skipped_when_a_direct_pdf_url_works(tmp_path, monkeypatch):
+    # OA resolution is a network round-trip on a fallback path; paying for it when the
+    # direct URL already produced a PDF would cost a request on every paper that works.
+    cache_dir = tmp_path / "pdfs"
+
+    def boom(doi, mailto=""):
+        raise AssertionError("OA resolution must not run when the direct URL succeeded")
+
+    monkeypatch.setattr("jarvis.sources.openalex_oa_urls", boom)
+    client = _FakeClient({"http://example.com/x.pdf": _FakeResponse(_REAL_PDF_BYTES)})
+    monkeypatch.setattr("httpx.Client", lambda **kw: client)
+
+    path = fetch_pdf({"pdf_url": "http://example.com/x.pdf", "doi": "10.1/x"}, cache_dir,
+                     unpaywall_email="me@example.com", paper_id="p1")
+    assert path is not None
+
+
+_LANDING_PAGE = (
+    b'<html><head><meta name="citation_title" content="A Paper">'
+    b'<meta name="citation_pdf_url" content="https://jisem-journal.com/download/14995">'
+    b"</head><body>abstract only</body></html>"
+)
+
+
+def test_a_landing_page_is_mined_for_its_citation_pdf_url(tmp_path, monkeypatch):
+    # Recovered a real 758KB PDF live for 10.52783/jisem.v11i3s.14995, which fails outright
+    # without this step. `citation_pdf_url` is the meta tag publishers already emit for
+    # Google Scholar and Zotero, so it is the intended route to the file, not a workaround.
+    cache_dir = tmp_path / "pdfs"
+    client = _FakeClient({
+        "https://doi.org/10.1/x": _FakeResponse(_LANDING_PAGE, content_type="text/html"),
+        "https://jisem-journal.com/download/14995": _FakeResponse(_REAL_PDF_BYTES),
+    })
+    monkeypatch.setattr("httpx.Client", lambda **kw: client)
+
+    path = fetch_pdf({"url": "https://doi.org/10.1/x"}, cache_dir,
+                     unpaywall_email="me@example.com", paper_id="p1")
+    assert path is not None
+    assert Path(path).read_bytes() == _REAL_PDF_BYTES
+
+
+def test_a_relative_citation_pdf_url_is_resolved_against_the_landing_page(
+    tmp_path, monkeypatch
+):
+    cache_dir = tmp_path / "pdfs"
+    page = (b'<html><head><meta name="citation_pdf_url" content="/article/download/99">'
+            b"</head></html>")
+    client = _FakeClient({
+        "https://journal.example.com/article/99":
+            _FakeResponse(page, content_type="text/html"),
+        "https://journal.example.com/article/download/99":
+            _FakeResponse(_REAL_PDF_BYTES),
+    })
+    monkeypatch.setattr("httpx.Client", lambda **kw: client)
+
+    path = fetch_pdf({"url": "https://journal.example.com/article/99"}, cache_dir,
+                     unpaywall_email="me@example.com", paper_id="p1")
+    assert path is not None
+
+
+def test_a_landing_page_without_the_meta_tag_is_simply_a_miss(tmp_path, monkeypatch):
+    cache_dir = tmp_path / "pdfs"
+    client = _FakeClient({"https://doi.org/10.1/x":
+                          _FakeResponse(_HTML_BYTES, content_type="text/html")})
+    monkeypatch.setattr("httpx.Client", lambda **kw: client)
+
+    path = fetch_pdf({"url": "https://doi.org/10.1/x"}, cache_dir,
+                     unpaywall_email="me@example.com", paper_id="p1")
+    assert path is None

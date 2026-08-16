@@ -15,7 +15,7 @@ anything else.
 ## Orient yourself in 60 seconds
 
 ```
-main:  dacb602 (all 10 spec steps + CLI + multi-provider + --max-deep), pushed, in sync
+main:  af19bfe (all 10 spec steps + CLI + multi-provider + --max-deep + OA fetch cascade)
 ```
 
 | What | Where |
@@ -29,8 +29,8 @@ main:  dacb602 (all 10 spec steps + CLI + multi-provider + --max-deep), pushed, 
 
 ```
 main:
-  HEAD:   dacb602  feat: --max-deep caps how many kept papers get deep-read per run
-  tests:  669 passing
+  HEAD:   af19bfe  feat: resolve OA PDFs through repository mirrors, not just publisher CDNs
+  tests:  757 passing
   ruff:   11 pre-existing violations, zero new
   remote: origin -> https://github.com/Bhaveshmeghwal21/openjarvis (public), pushed, in sync
 ```
@@ -259,14 +259,16 @@ planned. What comes next is scaling up the real run and the measurement work it 
 
 1. **Keep scaling the real gather.** `gcp-smoke-test`
    (`.dev-local/projects/gcp-smoke-test/corpus.db`) still has **177 candidates** sitting
-   at `pending_deep` after two `--max-deep` rounds (2 papers now fully deep-read out of
-   23 attempted, ~9% real fetch success rate — see Loose ends for the root cause found and
-   fixed, and what's left that's genuinely unfixable at this layer). Resuming with a
-   larger `--max-deep` is the fastest way to get more real fetch/parse/card data — no new
-   search needed. Use the exact env-var block in "Environment setup" above.
-2. **Check whether Unpaywall resolution actually works** — every candidate whose direct
-   fetch succeeded so far had a real `pdf_url` already; the DOI-only fallback path through
-   `make_unpaywall_pdf` has not been confirmed to succeed even once yet.
+   at `pending_deep` after two `--max-deep` rounds. Fetch success is now **20% (5/10 of
+   what is actually obtainable)** after `af19bfe` — see Loose ends for the three root
+   causes found and fixed, and for what genuinely cannot be fixed at this layer. Resuming
+   with a larger `--max-deep` is the fastest way to get more real fetch/parse/card data —
+   no new search needed. Use the exact env-var block in "Environment setup" above.
+2. **Pick an arXiv-heavy topic for the next corpus.** This one is 30% IEEE and carries
+   only **2 arXiv papers out of 179**, so 42% of it is `closed` and no fetch improvement
+   can reach it. Fetch reliability is as much a property of the topic's publisher mix as
+   of the fetcher — a learning-based topic would measure dramatically better, and that
+   confound is currently baked into every number this project has.
 3. **Once the corpus has enough cards, try `jarvis report`** — untested live so far; needs
    multiple cards to be meaningful, unlike the single-paper `ask()` test above. 2 cards
    exist now; probably still too few.
@@ -435,20 +437,39 @@ planned. What comes next is scaling up the real run and the measurement work it 
 - **The one number this entire project has never been able to produce: measured
   contradiction precision on a real corpus.** Still blocked — needs a corpus with papers
   that actually disagree, which the current 2-paper `gcp-smoke-test` corpus can't provide.
-- **Real fetch success rate, updated: 2/23 succeeded (~9%) across two `--max-deep` rounds.**
-  Root-caused, not just observed: the biggest single cause was `fetch.py` sending httpx's
-  default User-Agent, which several publisher CDNs (confirmed: MDPI, via Akamai) block
-  outright with a bare 403 before any content is even served — fixed in `8f22ba3` (a
-  realistic browser UA + `follow_redirects=True`), and confirmed live to fix at least one
-  real case (`ewadirect.com`). What's left after that fix is genuine, not fixable at this
-  layer: some CDNs block on deeper signals than UA (MDPI still 403s even with a browser
-  UA — likely TLS-fingerprint-level, not worth chasing for a single-document fetch), some
-  hosts are simply unreachable (`scirp.org` timed out at the connection level), and many
-  candidates never had a direct `pdf_url` at all and depend on Unpaywall resolving their
-  DOI, which has not been separately verified to be working. **Next fetch-reliability step,
-  if this matters more than scaling further: check whether Unpaywall resolution itself is
-  working for the DOI-only candidates** — nobody has confirmed that path succeeds even
-  once yet, as opposed to the direct-`pdf_url` path which has (twice).
+- **Real fetch success rate: 9% → 20% (`af19bfe`), which is 5/10 of what is obtainable.**
+  The headline percentage is the least useful number here; the denominator is the story.
+  Of 25 real corpus DOIs, **15 are `closed` in OpenAlex** — genuinely paywalled
+  subscription content, not a fetch failure. Against the 10 that are open access at all,
+  the cascade now gets 5.
+
+  Three separate faults were found by measuring rather than guessing, all fixed:
+  1. `_candidate_urls` guarded OA resolution with `if not urls`, so any paper carrying a
+     `url` (typically a doi.org landing page) skipped OA resolution entirely.
+  2. **Unpaywall had never once worked.** It answers HTTP 422 ("Please use your real email
+     address") for an empty *and* an invented email, and `UNPAYWALL_EMAIL` was never set.
+     OpenAlex carries the same data with no email wall and now goes first.
+  3. **Only ~1 OpenAlex location in 6 populates `pdf_url`.** On a real gold-OA paper: six
+     locations, one `pdf_url` (the publisher's own walled copy), while every reachable
+     mirror — Bristol Research, Europe PMC, Zenodo, orbilu.uni.lu — appeared *only* as a
+     `landing_page_url`. Reading `pdf_url` alone discarded nearly every copy that serves.
+
+  Landing pages are now mined for their `citation_pdf_url` meta tag (the one publishers
+  emit for Google Scholar and Zotero). One Hindawi paper that failed outright now arrives
+  as 6.6MB from `orbilu.uni.lu`.
+
+  **Publisher bot-walls are characterised, not guessed at.** MDPI serves an Akamai
+  `bm-verify` interstitial; Hindawi serves a Cloudflare challenge. `curl_cffi` TLS
+  impersonation was tested live: it flips MDPI 403→200 but returns the interstitial, not a
+  PDF, and does nothing for Hindawi — **0/4 real PDFs**, so TLS-level impersonation alone
+  is not the answer. Defeating either needs JS execution (stealth browser or a commercial
+  unblocker). Deliberately not built; ranking repository mirrors ahead of walled hosts got
+  11/12 on the same set without it.
+
+  Remaining limits, all confirmed live: PMC serves a robot interstitial on direct PDF
+  links (its official OA API is the sanctioned route and is not wired up), and some
+  institutional repositories bot-block too (Bristol's Pure 403s). Europe PMC covers only
+  biomedical — 4/28 here, since MDPI *Sensors* is indexed but *Drones*/*Energies* are not.
 - **`azure` and DeepSeek-as-`openai` providers are implemented and unit-tested but not
   yet exercised live** — only `gcp` has been proven against a real endpoint so far.
 - **`jarvis/retriever.py`'s RRF cross-round fix has no real regression test** — still open,
@@ -492,8 +513,9 @@ Design spec §15 and CLI spec §12:
    re-fetch, a meaningful `source_path`), and the URL question was never actually the
    blocker — `torch.compile`/OpenMP was.
 7. **What is the real fetch success rate on a typical 100-300 candidate gather?**
-   Best data so far: **2/23 succeeded (~9%)** on this project, after fixing the biggest
-   single cause (a blocked User-Agent, see Loose ends). Still a small, single-topic
+   Best data so far: **20%** on this project (5 of the 10 sampled DOIs that are open
+   access at all; the other 15 of 25 are `closed`), after fixing three root causes in
+   `af19bfe` — see Loose ends. Still a small, single-topic
    sample — genuinely low, or an artifact of this particular topic's publisher mix, is
    not yet distinguishable. 177 candidates remain queued at `pending_deep` for whoever
    wants a bigger sample.
